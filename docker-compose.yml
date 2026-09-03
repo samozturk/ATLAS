@@ -1,0 +1,22 @@
+services:
+  atlas:
+    build: .
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    init: true
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      ATLAS_API_URL: http://atlas:8000
+      ATLAS_UI_ALLOWED_HOSTS: cortex
+    ports:
+      - "3001:3001"
+    depends_on:
+      - atlas
+    init: true
+    restart: unless-stopped

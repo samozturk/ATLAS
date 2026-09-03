@@ -1,0 +1,1 @@
+"""ATLAS application package."""
