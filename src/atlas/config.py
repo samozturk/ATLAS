@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     llm_retry_backoff_seconds: float = Field(default=0.25, ge=0, le=10)
     agent_max_tool_rounds: int = Field(default=3, ge=1, le=8)
     tool_execution_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    # Weather stays opt-in: ATLAS only sends a fixed, owner-configured home
+    # location to its provider and never accepts a location from the model.
+    weather_latitude: float | None = Field(default=None, ge=-90, le=90)
+    weather_longitude: float | None = Field(default=None, ge=-180, le=180)
+    weather_request_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    weather_cache_ttl_seconds: int = Field(default=600, ge=60, le=3600)
     llm_system_prompt: str = (
         "You are A.T.L.A.S.: the Adaptive, Thoughtful, Local Assistant System—a private, "
         "local-first intelligence for the home. You are calm, warm, observant, and quietly "
@@ -46,6 +52,18 @@ class Settings(BaseSettings):
         "taken an action, accessed a device, remembered information, or observed the home "
         "unless a tool result confirms it. Ask a focused follow-up only when it is needed."
     )
+
+    @model_validator(mode="after")
+    def weather_location_is_complete(self) -> "Settings":
+        """Require an explicit home coordinate pair before enabling weather."""
+        if (self.weather_latitude is None) != (self.weather_longitude is None):
+            raise ValueError("weather latitude and longitude must be configured together")
+        return self
+
+    @property
+    def weather_enabled(self) -> bool:
+        """Whether this deployment has an owner-configured weather location."""
+        return self.weather_latitude is not None and self.weather_longitude is not None
 
 
 @lru_cache

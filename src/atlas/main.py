@@ -18,6 +18,8 @@ from atlas.llm.ollama import OllamaProvider
 from atlas.llm.provider import LLMError, LLMProvider
 from atlas.llm.service import ChatService
 from atlas.logging import configure_logging
+from atlas.tools import CurrentTimeTool, CurrentWeatherTool, ToolRegistry
+from atlas.weather import OpenMeteoWeatherClient
 
 log = structlog.get_logger(__name__)
 
@@ -40,6 +42,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         app.state.ready = False
         await app.state.llm_provider.aclose()
+        weather_client: OpenMeteoWeatherClient | None = app.state.weather_client
+        if weather_client is not None:
+            await weather_client.aclose()
         # A dedicated shutdown boundary makes later worker cleanup deterministic.
         await asyncio.sleep(0)
         log.info("atlas.stopped", system_event=AtlasEvent(type="system.stopped").model_dump(mode="json"))
@@ -55,7 +60,19 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
     app.state.settings = settings
     app.state.ready = False
     app.state.llm_provider = provider or OllamaProvider(settings)
-    app.state.chat_service = ChatService(settings, app.state.llm_provider)
+    registered_tools = [CurrentTimeTool()]
+    app.state.weather_client: OpenMeteoWeatherClient | None = None
+    if settings.weather_enabled:
+        app.state.weather_client = OpenMeteoWeatherClient(settings)
+        registered_tools.append(CurrentWeatherTool(app.state.weather_client))
+    app.state.chat_service = ChatService(
+        settings,
+        app.state.llm_provider,
+        tool_registry=ToolRegistry(
+            registered_tools,
+            execution_timeout_seconds=settings.tool_execution_timeout_seconds,
+        ),
+    )
 
     @app.exception_handler(LLMError)
     async def llm_error_handler(_: Request, error: LLMError) -> JSONResponse:

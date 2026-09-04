@@ -116,11 +116,24 @@ Request/connect timeouts and retry settings are listed in `.env.example`.
 
 ## Tool calling
 
-ATLAS now supplies the model with one safe, read-only tool: `get_current_time`.
-When a model requests it, ATLAS validates the empty input schema, reads the
-Mac Studio's local clock, passes the structured result back to the model, and
-allows a final answer. The model cannot invoke arbitrary functions or reach
-unregistered integrations.
+ATLAS supplies safe, read-only tools. `get_current_time` is always available.
+`get_current_weather` is available only when the owner configures both home
+coordinates. It queries [Open-Meteo's forecast API](https://open-meteo.com/en/docs)
+with that fixed location, normalizes current conditions, and caches them for
+ten minutes by default. The model cannot choose a location or invoke arbitrary
+functions or unregistered integrations.
+
+Enable weather by adding both values to `.env`; keep them unset to disable the
+integration entirely:
+
+```bash
+ATLAS_WEATHER_LATITUDE=<home-latitude>
+ATLAS_WEATHER_LONGITUDE=<home-longitude>
+```
+
+Weather is an external request: the configured coordinates are sent to the
+provider. `ATLAS_WEATHER_REQUEST_TIMEOUT_SECONDS` and
+`ATLAS_WEATHER_CACHE_TTL_SECONDS` control its bounded request and cache.
 
 Each chat turn allows at most three model-to-tool rounds by default. Configure
 `ATLAS_AGENT_MAX_TOOL_ROUNDS` and `ATLAS_TOOL_EXECUTION_TIMEOUT_SECONDS` in

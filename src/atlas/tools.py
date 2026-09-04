@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from atlas.llm.models import ChatMessage, MessageRole, ToolCall, ToolDefinition
+from atlas.weather import WeatherSnapshot
 
 
 class ToolInput(BaseModel):
@@ -90,8 +91,44 @@ class CurrentTimeTool:
         )
 
 
+class CurrentWeatherInput(ToolInput):
+    """The home weather location is owner-configured, not model-supplied."""
+
+
+class WeatherReader(Protocol):
+    """Read the current conditions from an approved weather adapter."""
+
+    async def current(self) -> WeatherSnapshot: ...
+
+
+class CurrentWeatherTool:
+    """Return cached current conditions for ATLAS's configured home."""
+
+    name = "get_current_weather"
+    description = "Get the current weather at the configured ATLAS home location."
+    input_model = CurrentWeatherInput
+
+    def __init__(self, reader: WeatherReader) -> None:
+        self._reader = reader
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            function={
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_model.model_json_schema(),
+            }
+        )
+
+    async def execute(self, arguments: CurrentWeatherInput) -> str:
+        del arguments
+        snapshot = await self._reader.current()
+        return json.dumps(snapshot.model_dump(mode="json"), separators=(",", ":"))
+
+
 class ToolRegistry:
-        """Validate and execute only the tools explicitly registered by ATLAS."""
+    """Validate and execute only the tools explicitly registered by ATLAS."""
 
     def __init__(self, tools: Iterable[AtlasTool], *, execution_timeout_seconds: float) -> None:
         registered_tools = list(tools)

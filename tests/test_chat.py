@@ -249,3 +249,24 @@ def test_chat_selects_the_deep_model() -> None:
     assert response.status_code == 200
     assert response.json()["brain"] == "deep"
     assert provider.model == "qwen3.5:122b-a10b"
+
+
+def test_chat_registers_weather_only_for_an_explicit_home_location() -> None:
+    provider = FakeProvider()
+    app = create_app(
+        Settings(
+            environment="test",
+            weather_latitude=41.0082,
+            weather_longitude=28.9784,
+        ),
+        provider=provider,
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/chat", json={"messages": [{"role": "user", "content": "Hello"}]})
+
+    assert response.status_code == 200
+    assert [tool.function["name"] for tool in provider.tools] == [
+        "get_current_time",
+        "get_current_weather",
+    ]
