@@ -12,7 +12,7 @@ from atlas.llm.models import (
     MessageRole,
 )
 from atlas.llm.provider import LLMError, LLMProvider
-from atlas.tools import CurrentTimeTool, ToolRegistry
+from atlas.tools import CurrentTimeTool, ToolExecution, ToolRegistry
 
 
 class ToolRoundLimitError(LLMError):
@@ -84,13 +84,18 @@ class ChatService:
                 yield done_event.model_copy(update={"brain": brain})
                 return
 
-            await self._append_tool_results(
+            tool_results = await self._append_tool_results(
                 messages,
                 ChatMessage(
                     role=MessageRole.ASSISTANT,
                     content="".join(content),
                     tool_calls=tool_calls,
                 ),
+            )
+            yield ChatStreamEvent(
+                type="tool_result",
+                tool_results=[result.model_dump(mode="json", exclude_none=True) for result in tool_results],
+                brain=brain,
             )
         raise ToolRoundLimitError("ATLAS reached its tool-call limit for this request.")
 
@@ -106,8 +111,13 @@ class ChatService:
             *(message.as_internal() for message in conversation),
         ]
 
-    async def _append_tool_results(self, messages: list[ChatMessage], assistant: ChatMessage) -> None:
+    async def _append_tool_results(
+        self, messages: list[ChatMessage], assistant: ChatMessage
+    ) -> list[ToolExecution]:
         messages.append(assistant)
+        results = []
         for tool_call in assistant.tool_calls:
             result = await self._tool_registry.execute(tool_call)
             messages.append(result.as_message())
+            results.append(result)
+        return results

@@ -7,6 +7,8 @@ services:
       - "8000:8000"
     init: true
     restart: unless-stopped
+    volumes:
+      - atlas-data:/app/data
 
   frontend:
     build:
@@ -20,3 +22,6 @@ services:
       - atlas
     init: true
     restart: unless-stopped
+
+volumes:
+  atlas-data:

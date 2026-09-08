@@ -52,7 +52,33 @@ type ToolActivity = {
   id: string;
   name: string;
   location?: string;
+  ok?: boolean;
+  content?: string;
 };
+
+type ConversationSummary = {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type StoredMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  brain?: Brain;
+  model?: string;
+  tool_activity?: Array<{
+    tool_call_id?: string;
+    tool_name: string;
+    arguments?: Record<string, unknown>;
+    ok?: boolean;
+    content?: string;
+  }>;
+};
+
+type StoredConversation = ConversationSummary & { messages: StoredMessage[] };
 
 type ToolCallPayload = {
   id?: string;
@@ -62,6 +88,13 @@ type ToolCallPayload = {
   };
 };
 
+type ToolResultPayload = {
+  tool_call_id?: string;
+  tool_name?: string;
+  ok?: boolean;
+  content?: string;
+};
+
 type StreamPayload = {
   type: 'thinking' | 'token' | 'tool_call' | 'done';
   content?: string;
@@ -69,6 +102,7 @@ type StreamPayload = {
   model?: string;
   detail?: string;
   tool_calls?: ToolCallPayload[];
+  tool_results?: ToolResultPayload[];
 };
 
 const brains: Record<Brain, { label: string; model: string; description: string; accent: string }> = {
@@ -156,11 +190,44 @@ function toolActivityFromCalls(toolCalls: ToolCallPayload[]): ToolActivity[] {
   });
 }
 
+function toolActivityFromStored(activity: StoredMessage['tool_activity']): ToolActivity[] {
+  return (activity ?? []).map((tool, index) => ({
+    id: tool.tool_call_id ?? `${tool.tool_name}-${index}`,
+    name: tool.tool_name,
+    location: typeof tool.arguments?.location === 'string' ? tool.arguments.location : undefined,
+    ok: tool.ok,
+    content: tool.content,
+  }));
+}
+
+function applyToolResults(activity: ToolActivity[], results: ToolResultPayload[]): ToolActivity[] {
+  return activity.map((tool) => {
+    const result = results.find((candidate) =>
+      candidate.tool_call_id ? candidate.tool_call_id === tool.id : candidate.tool_name === tool.name && tool.ok === undefined,
+    );
+    return result ? { ...tool, ok: result.ok, content: result.content } : tool;
+  });
+}
+
+function messageFromStored(message: StoredMessage): Message {
+  return {
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    brain: message.brain,
+    model: message.model,
+    toolActivity: toolActivityFromStored(message.tool_activity),
+  };
+}
+
 export default function HomePage() {
   const [brain, setBrain] = useState<Brain>('fast');
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [draft, setDraft] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [connection, setConnection] = useState<'ready' | 'working' | 'offline'>('ready');
   const transcriptEnd = useRef<HTMLDivElement>(null);
 
@@ -168,10 +235,51 @@ export default function HomePage() {
     transcriptEnd.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages, isStreaming]);
 
+  const loadConversation = async (id: string) => {
+    const response = await fetch(`/conversations/${id}`);
+    if (!response.ok) throw new Error('ATLAS could not load this conversation.');
+    const conversation = await response.json() as StoredConversation;
+    setConversationId(conversation.id);
+    setMessages(conversation.messages.length ? conversation.messages.map(messageFromStored) : initialMessages);
+  };
+
+  const refreshConversations = async () => {
+    const response = await fetch('/conversations');
+    if (!response.ok) throw new Error('ATLAS could not load conversation history.');
+    const data = await response.json() as ConversationSummary[];
+    setConversations(data);
+    return data;
+  };
+
+  const createConversation = async () => {
+    const response = await fetch('/conversations', { method: 'POST' });
+    if (!response.ok) throw new Error('ATLAS could not start a new conversation.');
+    const conversation = await response.json() as ConversationSummary;
+    setConversationId(conversation.id);
+    setMessages(initialMessages);
+    setConversations((current) => [conversation, ...current]);
+    return conversation;
+  };
+
+  useEffect(() => {
+    const restoreConversation = async () => {
+      try {
+        const savedConversations = await refreshConversations();
+        if (savedConversations[0]) await loadConversation(savedConversations[0].id);
+        else await createConversation();
+      } catch {
+        setConnection('offline');
+      } finally {
+        setIsLoadingHistory(false);
+      }
+    };
+    void restoreConversation();
+  }, []);
+
   const sendMessage = async (event?: { preventDefault: () => void }) => {
     event?.preventDefault();
     const content = draft.trim();
-    if (!content || isStreaming) return;
+    if (!content || isStreaming || !conversationId) return;
 
     const userMessage: Message = { id: createMessageId(), role: 'user', content };
     const assistantId = createMessageId();
@@ -182,10 +290,6 @@ export default function HomePage() {
       brain,
       isStreaming: true,
     };
-    const requestMessages = [...messages, userMessage].map(({ role, content: messageContent }) => ({
-      role,
-      content: messageContent,
-    }));
 
     setDraft('');
     setMessages((current) => [...current, userMessage, assistantMessage]);
@@ -196,7 +300,11 @@ export default function HomePage() {
       const response = await fetch('/chat/stream', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ brain, messages: requestMessages }),
+        body: JSON.stringify({
+          brain,
+          conversation_id: conversationId,
+          messages: [{ role: 'user', content }],
+        }),
       });
       if (!response.ok || !response.body) {
         throw new Error((await response.text()) || 'ATLAS could not start a response.');
@@ -230,6 +338,12 @@ export default function HomePage() {
                   toolActivity: [...(message.toolActivity ?? []), ...activity],
                 };
               }
+              if (frame.event === 'tool_result') {
+                return {
+                  ...message,
+                  toolActivity: applyToolResults(message.toolActivity ?? [], frame.data.tool_results ?? []),
+                };
+              }
               if (frame.event === 'done') {
                 return {
                   ...message,
@@ -244,12 +358,33 @@ export default function HomePage() {
         }
       }
       setConnection('ready');
+      await refreshConversations();
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'ATLAS is unavailable.';
       setMessages(markConversationUnavailable(assistantId, detail));
       setConnection('offline');
     } finally {
       setIsStreaming(false);
+    }
+  };
+
+  const startNewConversation = async () => {
+    if (isStreaming || isLoadingHistory) return;
+    try {
+      await createConversation();
+      setConnection('ready');
+    } catch {
+      setConnection('offline');
+    }
+  };
+
+  const selectConversation = async (id: string) => {
+    if (isStreaming || id === conversationId) return;
+    try {
+      await loadConversation(id);
+      setConnection('ready');
+    } catch {
+      setConnection('offline');
     }
   };
 
@@ -300,6 +435,12 @@ export default function HomePage() {
                 <SidebarItem icon={<Home />} label="Home state" hint="Soon" />
                 <SidebarItem icon={<Activity />} label="Event feed" hint="Soon" />
               </nav>
+              <div className="mt-6 border-t border-white/[0.06] pt-4">
+                <p className="px-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">Recent conversations</p>
+                <div className="mt-2 space-y-1">
+                  {conversations.slice(0, 6).map((conversation) => <button key={conversation.id} type="button" onClick={() => void selectConversation(conversation.id)} className={`conversation-item ${conversation.id === conversationId ? 'conversation-item-active' : ''}`} title={conversation.title}>{conversation.title}</button>)}
+                </div>
+              </div>
             </div>
             <div className="rounded-2xl border border-white/[0.07] bg-black/20 p-3">
               <div className="flex items-center gap-2 text-xs font-medium text-slate-200"><CircleDot className="size-3.5 text-cyan-300" />System posture</div>
@@ -311,11 +452,11 @@ export default function HomePage() {
           <section className="chat-panel glass-panel relative flex min-h-[680px] flex-col overflow-hidden">
             <div className="chat-header">
               <div><p className="eyebrow">Private conversation</p><h2 className="mt-1 text-lg font-medium tracking-tight text-white sm:text-xl">What would you like to explore?</h2></div>
-              <Button variant="ghost" size="sm" className="gap-1.5 text-slate-400 hover:bg-white/5 hover:text-white" onClick={() => setMessages(initialMessages)}><Plus className="size-3.5" />New thread</Button>
+              <Button variant="ghost" size="sm" className="gap-1.5 text-slate-400 hover:bg-white/5 hover:text-white" onClick={() => void startNewConversation()} disabled={isStreaming || isLoadingHistory}><Plus className="size-3.5" />New thread</Button>
             </div>
             <div className="message-scrollbar flex-1 overflow-y-auto px-4 py-8 sm:px-9">
               <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
-                <div className="system-line"><span /><p>Local session · No memory saved yet</p><span /></div>
+                <div className="system-line"><span /><p>Local history · Stored on this machine</p><span /></div>
                 {messages.map((message) => <MessageBubble key={message.id} message={message} />)}
                 <div ref={transcriptEnd} />
               </div>
@@ -323,8 +464,8 @@ export default function HomePage() {
             <form onSubmit={sendMessage} className="composer-wrap">
               <div className="composer-glow" />
               <div className="composer relative">
-                <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="Message ATLAS…" aria-label="Message ATLAS" className="min-h-[96px] resize-none border-0 bg-transparent px-4 py-4 pr-14 text-sm leading-6 text-white placeholder:text-slate-600 focus-visible:ring-0" disabled={isStreaming} />
-                <Button type="submit" size="icon-lg" className="send-button absolute bottom-3 right-3 rounded-xl" disabled={!draft.trim() || isStreaming} aria-label="Send message"><ArrowUp className="size-4" /></Button>
+                <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="Message ATLAS…" aria-label="Message ATLAS" className="min-h-[96px] resize-none border-0 bg-transparent px-4 py-4 pr-14 text-sm leading-6 text-white placeholder:text-slate-600 focus-visible:ring-0" disabled={isStreaming || isLoadingHistory || !conversationId} />
+                <Button type="submit" size="icon-lg" className="send-button absolute bottom-3 right-3 rounded-xl" disabled={!draft.trim() || isStreaming || isLoadingHistory || !conversationId} aria-label="Send message"><ArrowUp className="size-4" /></Button>
                 <div className="flex items-center gap-2 px-4 pb-3 text-[10px] font-medium text-slate-600"><Command className="size-3" />Enter to send <span className="mx-0.5 text-slate-800">·</span> Shift + Enter for a new line</div>
               </div>
             </form>
@@ -380,8 +521,9 @@ function ToolActivityCard({ activity, isStreaming }: { activity: ToolActivity[];
       const isWeather = tool.name === 'get_current_weather';
       const isTime = tool.name === 'get_current_time';
       const label = isWeather ? 'Weather' : isTime ? 'Local time' : tool.name.replaceAll('_', ' ');
-      const detail = isWeather
-        ? tool.location ? `Checking ${tool.location}` : 'Checking Waalwijk'
+      const detail = tool.ok === false ? tool.content ?? 'Tool unavailable'
+        : tool.ok === true ? toolResultSummary(tool, isWeather, isTime)
+        : isWeather ? tool.location ? `Checking ${tool.location}` : 'Checking Waalwijk'
         : isTime ? 'Reading local time' : 'Using ATLAS tool';
       const Icon = isWeather ? CloudSun : isTime ? Clock3 : Wrench;
       return <div className="tool-activity-item" key={tool.id}>
@@ -390,4 +532,14 @@ function ToolActivityCard({ activity, isStreaming }: { activity: ToolActivity[];
       </div>;
     })}
   </div>;
+}
+
+function toolResultSummary(tool: ToolActivity, isWeather: boolean, isTime: boolean): string {
+  if (!tool.content) return 'Tool used for this response';
+  try {
+    const result = JSON.parse(tool.content) as Record<string, unknown>;
+    if (isWeather && typeof result.location === 'string' && typeof result.temperature_c === 'number' && typeof result.condition === 'string') return `${result.location} · ${result.temperature_c}°C · ${result.condition}`;
+    if (isTime && typeof result.local_time === 'string') return result.local_time;
+  } catch { /* A tool may intentionally return plain text. */ }
+  return 'Tool used for this response';
 }

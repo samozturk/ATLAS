@@ -140,6 +140,17 @@ API: its development server proxies chat requests to ATLAS, so the browser never
 needs a separate cross-origin configuration. `docker compose up --build` starts
 both services and exposes the interface at `http://localhost:3001`.
 
+## Local conversation history
+
+ATLAS stores conversations, messages, selected brain/model, and read-only tool
+outcomes in local SQLite. The chat interface restores the most recently active
+conversation after a refresh and provides a small recent-conversations list.
+No conversation content is sent to a separate persistence service.
+
+The database defaults to `data/atlas.db`; change `ATLAS_DATABASE_PATH` only if
+you need a different local path. Docker mounts `/app/data` as the named
+`atlas-data` volume, so conversation history survives container recreation.
+
 For Tailnet access, Compose allows the configured Studio hostname (`cortex`) to
 reach Vite. If you rename that machine or use a different MagicDNS hostname,
 change `ATLAS_UI_ALLOWED_HOSTS` in `docker-compose.yml` (a comma-separated list

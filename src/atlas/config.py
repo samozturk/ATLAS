@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     llm_retry_backoff_seconds: float = Field(default=0.25, ge=0, le=10)
     agent_max_tool_rounds: int = Field(default=3, ge=1, le=8)
     tool_execution_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    database_path: str = "data/atlas.db"
     weather_request_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     weather_cache_ttl_seconds: int = Field(default=600, ge=60, le=3600)
     llm_system_prompt: str = (

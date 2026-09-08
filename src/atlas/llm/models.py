@@ -89,9 +89,10 @@ class ChatCompletion(BaseModel):
 class ChatStreamEvent(BaseModel):
     """A normalized item from an LLM streaming response."""
 
-    type: Literal["thinking", "token", "tool_call", "done"]
+    type: Literal["thinking", "token", "tool_call", "tool_result", "done"]
     content: str = ""
     tool_calls: list[ToolCall] = Field(default_factory=list)
+    tool_results: list[dict[str, Any]] = Field(default_factory=list)
     brain: Brain | None = None
     model: str | None = None
     usage: Usage | None = None
@@ -112,6 +113,7 @@ class ChatRequest(BaseModel):
 
     messages: list[ConversationMessage] = Field(min_length=1, max_length=100)
     brain: Brain = Brain.FAST
+    conversation_id: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def ends_with_user_message(self) -> "ChatRequest":

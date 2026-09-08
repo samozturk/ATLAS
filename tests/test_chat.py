@@ -105,8 +105,8 @@ def test_streaming_chat_returns_server_sent_events() -> None:
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
-    assert 'event: token\ndata: {"type":"token","content":"Hello","tool_calls":[],"brain":"fast"}' in response.text
-    assert 'event: done\ndata: {"type":"done","content":"","tool_calls":[],"brain":"fast","model":"test-model"}' in response.text
+    assert 'event: token\ndata: {"type":"token","content":"Hello","tool_calls":[],"tool_results":[],"brain":"fast"}' in response.text
+    assert 'event: done\ndata: {"type":"done","content":"","tool_calls":[],"tool_results":[],"brain":"fast","model":"test-model"}' in response.text
 
 
 class ToolCallingProvider:
@@ -230,7 +230,9 @@ def test_streaming_chat_continues_after_a_tool_call() -> None:
 
     events = asyncio.run(exercise())
 
-    assert [event.type for event in events] == ["tool_call", "token", "done"]
+    assert [event.type for event in events] == ["tool_call", "tool_result", "token", "done"]
+    assert events[1].tool_results[0]["tool_name"] == "get_current_time"
+    assert events[1].tool_results[0]["ok"] is True
     assert events[-1].model == "qwen3.6:35b"
     assert len(provider.requests) == 2
     assert provider.requests[1][-1].role is MessageRole.TOOL
@@ -263,3 +265,37 @@ def test_chat_registers_weather_with_the_waalwijk_default() -> None:
         "get_current_time",
         "get_current_weather",
     ]
+
+
+def test_streaming_chat_persists_and_restores_a_conversation_with_tool_activity(tmp_path) -> None:
+    provider = StreamingToolProvider()
+    app = create_app(
+        Settings(environment="test", database_path=str(tmp_path / "atlas.db")), provider=provider
+    )
+
+    with TestClient(app) as client:
+        created = client.post("/conversations")
+        assert created.status_code == 201
+        conversation_id = created.json()["id"]
+
+        response = client.post(
+            "/chat/stream",
+            json={
+                "conversation_id": conversation_id,
+                "messages": [{"role": "user", "content": "What time is it?"}],
+            },
+        )
+        restored = client.get(f"/conversations/{conversation_id}")
+        summaries = client.get("/conversations")
+
+    assert response.status_code == 200
+    assert 'event: tool_result' in response.text
+    assert restored.status_code == 200
+    messages = restored.json()["messages"]
+    assert [(message["role"], message["content"]) for message in messages] == [
+        ("user", "What time is it?"),
+        ("assistant", "The tool result is available."),
+    ]
+    assert messages[1]["tool_activity"][0]["tool_name"] == "get_current_time"
+    assert messages[1]["tool_activity"][0]["ok"] is True
+    assert summaries.json()[0]["title"] == "What time is it?"

@@ -60,6 +60,10 @@ export default defineConfig(async () => {
           target: process.env.ATLAS_API_URL ?? 'http://localhost:8000',
           changeOrigin: true,
         },
+        '/conversations': {
+          target: process.env.ATLAS_API_URL ?? 'http://localhost:8000',
+          changeOrigin: true,
+        },
       },
     },
     plugins: [
