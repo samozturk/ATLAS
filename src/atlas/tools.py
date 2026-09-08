@@ -92,20 +92,25 @@ class CurrentTimeTool:
 
 
 class CurrentWeatherInput(ToolInput):
-    """The home weather location is owner-configured, not model-supplied."""
+    """An optional user-requested place; omitted uses the configured home."""
+
+    location: str | None = Field(default=None, min_length=2, max_length=120)
 
 
 class WeatherReader(Protocol):
     """Read the current conditions from an approved weather adapter."""
 
-    async def current(self) -> WeatherSnapshot: ...
+    async def current(self, location: str | None = None) -> WeatherSnapshot: ...
 
 
 class CurrentWeatherTool:
-    """Return cached current conditions for ATLAS's configured home."""
+    """Return current conditions for a requested place or ATLAS's home."""
 
     name = "get_current_weather"
-    description = "Get the current weather at the configured ATLAS home location."
+    description = (
+        "Get current weather. Omit location for the configured ATLAS home in Waalwijk; "
+        "provide location only when the user asks about a different place."
+    )
     input_model = CurrentWeatherInput
 
     def __init__(self, reader: WeatherReader) -> None:
@@ -122,8 +127,7 @@ class CurrentWeatherTool:
         )
 
     async def execute(self, arguments: CurrentWeatherInput) -> str:
-        del arguments
-        snapshot = await self._reader.current()
+        snapshot = await self._reader.current(arguments.location)
         return json.dumps(snapshot.model_dump(mode="json"), separators=(",", ":"))
 
 

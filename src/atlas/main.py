@@ -61,10 +61,8 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
     app.state.ready = False
     app.state.llm_provider = provider or OllamaProvider(settings)
     registered_tools = [CurrentTimeTool()]
-    app.state.weather_client: OpenMeteoWeatherClient | None = None
-    if settings.weather_enabled:
-        app.state.weather_client = OpenMeteoWeatherClient(settings)
-        registered_tools.append(CurrentWeatherTool(app.state.weather_client))
+    app.state.weather_client = OpenMeteoWeatherClient(settings)
+    registered_tools.append(CurrentWeatherTool(app.state.weather_client))
     app.state.chat_service = ChatService(
         settings,
         app.state.llm_provider,

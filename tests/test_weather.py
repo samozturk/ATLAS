@@ -7,18 +7,22 @@ import pytest
 from atlas.config import Settings
 from atlas.llm.models import ToolCall, ToolFunction
 from atlas.tools import CurrentWeatherTool, ToolRegistry
-from atlas.weather import OpenMeteoWeatherClient, WeatherError, WeatherSnapshot
+from atlas.weather import (
+    OpenMeteoWeatherClient,
+    WeatherLocationNotFoundError,
+    WeatherSnapshot,
+)
 
 
 def _weather_payload() -> dict[str, object]:
     return {
-        "utc_offset_seconds": 10800,
-        "timezone": "Europe/Istanbul",
+        "utc_offset_seconds": 7200,
+        "timezone": "Europe/Amsterdam",
         "current": {
-            "time": "2026-09-04T19:30",
-            "temperature_2m": 24.5,
+            "time": "2026-09-08T17:30",
+            "temperature_2m": 18.5,
             "relative_humidity_2m": 62,
-            "apparent_temperature": 24.8,
+            "apparent_temperature": 18.3,
             "precipitation": 0.0,
             "weather_code": 2,
             "wind_speed_10m": 11.2,
@@ -27,83 +31,107 @@ def _weather_payload() -> dict[str, object]:
     }
 
 
-def test_weather_client_uses_fixed_home_coordinates_and_caches_results() -> None:
-    requests: list[httpx.Request] = []
+def _geocoding_payload(name: str, latitude: float, longitude: float) -> dict[str, object]:
+    return {
+        "results": [
+            {
+                "name": name,
+                "admin1": "North Brabant" if name == "Waalwijk" else None,
+                "country": "Netherlands",
+                "latitude": latitude,
+                "longitude": longitude,
+            }
+        ]
+    }
+
+
+def test_weather_client_geocodes_the_default_and_requested_locations_then_caches() -> None:
+    geocoding_requests: list[httpx.Request] = []
+    forecast_requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
+        if request.url.host == "geocoding-api.open-meteo.com":
+            geocoding_requests.append(request)
+            if request.url.params["name"] == "Waalwijk, Netherlands":
+                return httpx.Response(200, json=_geocoding_payload("Waalwijk", 51.6825, 5.0708))
+            return httpx.Response(200, json=_geocoding_payload("Amsterdam", 52.3676, 4.9041))
+        forecast_requests.append(request)
         return httpx.Response(200, json=_weather_payload())
 
-    async def exercise() -> WeatherSnapshot:
+    async def exercise() -> tuple[WeatherSnapshot, WeatherSnapshot]:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        weather = OpenMeteoWeatherClient(
-            Settings(weather_latitude=41.0082, weather_longitude=28.9784),
-            client=client,
-        )
-        first = await weather.current()
-        second = await weather.current()
+        weather = OpenMeteoWeatherClient(Settings(), client=client)
+        default = await weather.current()
+        assert await weather.current() is default
+        requested = await weather.current("Amsterdam, Netherlands")
         await client.aclose()
-        assert first is second
-        return first
+        return default, requested
 
-    snapshot = asyncio.run(exercise())
+    default, requested = asyncio.run(exercise())
 
-    assert len(requests) == 1
-    assert requests[0].url.params["latitude"] == "41.0082"
-    assert requests[0].url.params["longitude"] == "28.9784"
-    assert requests[0].url.params["current"] == (
-        "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,"
-        "weather_code,wind_speed_10m,is_day"
-    )
-    assert snapshot.condition == "partly cloudy"
-    assert snapshot.observed_at.isoformat() == "2026-09-04T19:30:00+03:00"
+    assert [request.url.params["name"] for request in geocoding_requests] == [
+        "Waalwijk, Netherlands",
+        "Amsterdam, Netherlands",
+    ]
+    assert len(forecast_requests) == 2
+    assert forecast_requests[0].url.params["latitude"] == "51.6825"
+    assert forecast_requests[1].url.params["longitude"] == "4.9041"
+    assert default.location == "Waalwijk, North Brabant, Netherlands"
+    assert requested.location == "Amsterdam, Netherlands"
+    assert requested.condition == "partly cloudy"
+    assert requested.observed_at.isoformat() == "2026-09-08T17:30:00+02:00"
 
 
-def test_weather_client_returns_a_controlled_error_for_bad_provider_data() -> None:
+def test_weather_client_returns_a_clear_error_when_a_location_is_not_found() -> None:
     async def exercise() -> None:
         client = httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda _: httpx.Response(200, json={}))
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"results": []}))
         )
-        weather = OpenMeteoWeatherClient(
-            Settings(weather_latitude=41.0082, weather_longitude=28.9784),
-            client=client,
-        )
-        with pytest.raises(WeatherError, match="Weather is unavailable"):
-            await weather.current()
+        weather = OpenMeteoWeatherClient(Settings(), client=client)
+        with pytest.raises(WeatherLocationNotFoundError, match="could not find"):
+            await weather.current("Nowhereville")
         await client.aclose()
 
     asyncio.run(exercise())
 
 
-def test_weather_tool_returns_structured_current_conditions() -> None:
+def test_weather_tool_forwards_an_optional_user_requested_location() -> None:
     class StaticWeatherReader:
-        async def current(self) -> WeatherSnapshot:
+        def __init__(self) -> None:
+            self.requested_location: str | None = None
+
+        async def current(self, location: str | None = None) -> WeatherSnapshot:
+            self.requested_location = location
             return WeatherSnapshot(
-                observed_at="2026-09-04T19:30:00+03:00",
-                timezone="Europe/Istanbul",
+                location="Amsterdam, Netherlands",
+                latitude=52.3676,
+                longitude=4.9041,
+                observed_at="2026-09-08T17:30:00+02:00",
+                timezone="Europe/Amsterdam",
                 condition="partly cloudy",
                 weather_code=2,
-                temperature_c=24.5,
-                apparent_temperature_c=24.8,
+                temperature_c=18.5,
+                apparent_temperature_c=18.3,
                 humidity_percent=62,
                 precipitation_mm=0,
                 wind_speed_kph=11.2,
                 is_day=True,
             )
 
-    registry = ToolRegistry([CurrentWeatherTool(StaticWeatherReader())], execution_timeout_seconds=1)
+    reader = StaticWeatherReader()
+    registry = ToolRegistry([CurrentWeatherTool(reader)], execution_timeout_seconds=1)
 
     async def exercise():
         return await registry.execute(
-            ToolCall(function=ToolFunction(name="get_current_weather", arguments={}))
+            ToolCall(
+                function=ToolFunction(
+                    name="get_current_weather", arguments={"location": "Amsterdam, Netherlands"}
+                )
+            )
         )
 
     result = asyncio.run(exercise())
 
     assert result.ok is True
-    assert json.loads(result.content)["condition"] == "partly cloudy"
-
-
-def test_weather_requires_a_complete_home_location() -> None:
-    with pytest.raises(ValueError, match="configured together"):
-        Settings(weather_latitude=41.0082)
+    assert reader.requested_location == "Amsterdam, Netherlands"
+    assert json.loads(result.content)["location"] == "Amsterdam, Netherlands"

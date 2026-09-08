@@ -1,6 +1,7 @@
-"""Opt-in, cached current-weather integration for ATLAS's configured home."""
+"""Geocoded, cached current-weather integration for ATLAS."""
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Any, Callable
@@ -15,9 +16,35 @@ class WeatherError(Exception):
     """An unavailable or malformed weather response safe to handle as a tool failure."""
 
 
+class WeatherLocationNotFoundError(WeatherError):
+    """The configured or requested place could not be resolved by the provider."""
+
+
+class ResolvedLocation(BaseModel):
+    """One provider-resolved place used to fetch weather."""
+
+    name: str
+    country: str | None = None
+    admin1: str | None = None
+    latitude: float
+    longitude: float
+
+    @property
+    def label(self) -> str:
+        parts = [self.name]
+        if self.admin1 and self.admin1 != self.name:
+            parts.append(self.admin1)
+        if self.country:
+            parts.append(self.country)
+        return ", ".join(parts)
+
+
 class WeatherSnapshot(BaseModel):
     """Normalized current conditions returned to the tool layer."""
 
+    location: str
+    latitude: float
+    longitude: float
     observed_at: datetime
     timezone: str
     condition: str
@@ -29,6 +56,12 @@ class WeatherSnapshot(BaseModel):
     wind_speed_kph: float
     is_day: bool
     source: str = "open-meteo"
+
+
+@dataclass(frozen=True)
+class _CachedWeather:
+    snapshot: WeatherSnapshot
+    expires_at: float
 
 
 _WEATHER_CONDITIONS = {
@@ -64,9 +97,10 @@ _WEATHER_CONDITIONS = {
 
 
 class OpenMeteoWeatherClient:
-    """Fetch and cache current conditions for the configured home coordinates."""
+    """Resolve named locations, then fetch and cache their current conditions."""
 
-    _endpoint = "https://api.open-meteo.com/v1/forecast"
+    _forecast_endpoint = "https://api.open-meteo.com/v1/forecast"
+    _geocoding_endpoint = "https://geocoding-api.open-meteo.com/v1/search"
     _current_variables = ",".join(
         (
             "temperature_2m",
@@ -85,31 +119,34 @@ class OpenMeteoWeatherClient:
         client: httpx.AsyncClient | None = None,
         clock: Callable[[], float] = monotonic,
     ) -> None:
-        if not settings.weather_enabled:
-            raise ValueError("weather requires configured home coordinates")
-        self._latitude = settings.weather_latitude
-        self._longitude = settings.weather_longitude
+        self._default_location = settings.weather_default_location
         self._cache_ttl_seconds = settings.weather_cache_ttl_seconds
         self._clock = clock
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(settings.weather_request_timeout_seconds)
         )
-        self._cache: WeatherSnapshot | None = None
-        self._cache_expires_at = 0.0
+        self._cache: dict[str, _CachedWeather] = {}
         self._cache_lock = asyncio.Lock()
 
-    async def current(self) -> WeatherSnapshot:
-        """Return cached data when fresh, otherwise issue one provider request."""
-        if self._cache is not None and self._clock() < self._cache_expires_at:
-            return self._cache
+    async def current(self, location: str | None = None) -> WeatherSnapshot:
+        """Return weather for a requested place or the configured Waalwijk default."""
+        requested_location = (location or self._default_location).strip()
+        cache_key = requested_location.casefold()
+        cached = self._cache.get(cache_key)
+        if cached is not None and self._clock() < cached.expires_at:
+            return cached.snapshot
 
         async with self._cache_lock:
-            if self._cache is not None and self._clock() < self._cache_expires_at:
-                return self._cache
-            snapshot = await self._fetch_current()
-            self._cache = snapshot
-            self._cache_expires_at = self._clock() + self._cache_ttl_seconds
+            cached = self._cache.get(cache_key)
+            if cached is not None and self._clock() < cached.expires_at:
+                return cached.snapshot
+            resolved_location = await self._geocode(requested_location)
+            snapshot = await self._fetch_current(resolved_location)
+            self._cache[cache_key] = _CachedWeather(
+                snapshot=snapshot,
+                expires_at=self._clock() + self._cache_ttl_seconds,
+            )
             return snapshot
 
     async def aclose(self) -> None:
@@ -117,13 +154,29 @@ class OpenMeteoWeatherClient:
         if self._owns_client:
             await self._client.aclose()
 
-    async def _fetch_current(self) -> WeatherSnapshot:
+    async def _geocode(self, location: str) -> ResolvedLocation:
         try:
             response = await self._client.get(
-                self._endpoint,
+                self._geocoding_endpoint,
+                params={"name": location, "count": 1, "language": "en", "format": "json"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("geocoding response is not an object")
+            return self._location_from_payload(payload, location)
+        except WeatherLocationNotFoundError:
+            raise
+        except (httpx.HTTPError, TypeError, ValueError) as error:
+            raise WeatherError("Weather location lookup is unavailable; try again shortly.") from error
+
+    async def _fetch_current(self, location: ResolvedLocation) -> WeatherSnapshot:
+        try:
+            response = await self._client.get(
+                self._forecast_endpoint,
                 params={
-                    "latitude": self._latitude,
-                    "longitude": self._longitude,
+                    "latitude": location.latitude,
+                    "longitude": location.longitude,
                     "current": self._current_variables,
                     "timezone": "auto",
                     "temperature_unit": "celsius",
@@ -135,12 +188,41 @@ class OpenMeteoWeatherClient:
             payload = response.json()
             if not isinstance(payload, dict):
                 raise ValueError("weather response is not an object")
-            return self._snapshot_from_payload(payload)
+            return self._snapshot_from_payload(payload, location)
         except (httpx.HTTPError, TypeError, ValueError) as error:
             raise WeatherError("Weather is unavailable; try again shortly.") from error
 
     @staticmethod
-    def _snapshot_from_payload(payload: dict[str, Any]) -> WeatherSnapshot:
+    def _location_from_payload(payload: dict[str, Any], requested_location: str) -> ResolvedLocation:
+        results = payload.get("results")
+        if not isinstance(results, list) or not results:
+            raise WeatherLocationNotFoundError(
+                f"ATLAS could not find a weather location for {requested_location!r}."
+            )
+        result = results[0]
+        if not isinstance(result, dict):
+            raise ValueError("geocoding response has an invalid result")
+        name = result.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("geocoding response has an invalid name")
+        country = result.get("country")
+        admin1 = result.get("admin1")
+        if country is not None and not isinstance(country, str):
+            raise ValueError("geocoding response has an invalid country")
+        if admin1 is not None and not isinstance(admin1, str):
+            raise ValueError("geocoding response has an invalid administrative area")
+        return ResolvedLocation(
+            name=name,
+            country=country,
+            admin1=admin1,
+            latitude=_number(result.get("latitude"), "latitude"),
+            longitude=_number(result.get("longitude"), "longitude"),
+        )
+
+    @staticmethod
+    def _snapshot_from_payload(
+        payload: dict[str, Any], location: ResolvedLocation
+    ) -> WeatherSnapshot:
         current = payload.get("current")
         if not isinstance(current, dict):
             raise ValueError("weather response has no current conditions")
@@ -156,6 +238,9 @@ class OpenMeteoWeatherClient:
             raise ValueError("weather response has invalid timezone")
 
         return WeatherSnapshot(
+            location=location.label,
+            latitude=location.latitude,
+            longitude=location.longitude,
             observed_at=observed_at,
             timezone=provider_timezone,
             condition=_WEATHER_CONDITIONS.get(weather_code, "unknown conditions"),

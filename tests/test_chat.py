@@ -251,16 +251,9 @@ def test_chat_selects_the_deep_model() -> None:
     assert provider.model == "qwen3.5:122b-a10b"
 
 
-def test_chat_registers_weather_only_for_an_explicit_home_location() -> None:
+def test_chat_registers_weather_with_the_waalwijk_default() -> None:
     provider = FakeProvider()
-    app = create_app(
-        Settings(
-            environment="test",
-            weather_latitude=41.0082,
-            weather_longitude=28.9784,
-        ),
-        provider=provider,
-    )
+    app = create_app(Settings(environment="test"), provider=provider)
 
     with TestClient(app) as client:
         response = client.post("/chat", json={"messages": [{"role": "user", "content": "Hello"}]})
