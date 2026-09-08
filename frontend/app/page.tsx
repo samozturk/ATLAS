@@ -14,7 +14,9 @@ import {
   Check,
   ChevronDown,
   CircleDot,
+  CloudSun,
   Command,
+  Clock3,
   Cpu,
   Gauge,
   History,
@@ -27,6 +29,7 @@ import {
   Settings2,
   Sparkles,
   Waves,
+  Wrench,
   Zap,
 } from 'lucide-react';
 
@@ -42,6 +45,21 @@ type Message = {
   brain?: Brain;
   model?: string;
   isStreaming?: boolean;
+  toolActivity?: ToolActivity[];
+};
+
+type ToolActivity = {
+  id: string;
+  name: string;
+  location?: string;
+};
+
+type ToolCallPayload = {
+  id?: string;
+  function?: {
+    name?: string;
+    arguments?: Record<string, unknown>;
+  };
 };
 
 type StreamPayload = {
@@ -50,6 +68,7 @@ type StreamPayload = {
   brain?: Brain;
   model?: string;
   detail?: string;
+  tool_calls?: ToolCallPayload[];
 };
 
 const brains: Record<Brain, { label: string; model: string; description: string; accent: string }> = {
@@ -124,6 +143,19 @@ function createMessageId(): string {
   return `message-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function toolActivityFromCalls(toolCalls: ToolCallPayload[]): ToolActivity[] {
+  return toolCalls.flatMap((toolCall, index) => {
+    const name = toolCall.function?.name;
+    if (!name) return [];
+    const location = toolCall.function?.arguments?.location;
+    return [{
+      id: toolCall.id ?? `${name}-${index}`,
+      name,
+      location: typeof location === 'string' ? location : undefined,
+    }];
+  });
+}
+
 export default function HomePage() {
   const [brain, setBrain] = useState<Brain>('fast');
   const [messages, setMessages] = useState<Message[]>(initialMessages);
@@ -190,6 +222,13 @@ export default function HomePage() {
               if (message.id !== assistantId) return message;
               if (frame.event === 'token') {
                 return { ...message, content: message.content + (frame.data.content ?? '') };
+              }
+              if (frame.event === 'tool_call') {
+                const activity = toolActivityFromCalls(frame.data.tool_calls ?? []);
+                return {
+                  ...message,
+                  toolActivity: [...(message.toolActivity ?? []), ...activity],
+                };
               }
               if (frame.event === 'done') {
                 return {
@@ -329,7 +368,26 @@ function MessageBubble({ message }: { message: Message }) {
     <div className="min-w-0">
       {isAssistant && <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">ATLAS{selectedBrain && <span className={`brain-badge brain-badge-${selectedBrain.accent}`}>{selectedBrain.label}</span>}</div>}
       <div className={`message-bubble ${isAssistant ? 'assistant-bubble' : 'user-bubble'}`}>{message.content || <span className="typing-dots"><i /><i /><i /></span>}</div>
+      {isAssistant && message.toolActivity?.length ? <ToolActivityCard activity={message.toolActivity} isStreaming={message.isStreaming ?? false} /> : null}
       {isAssistant && (message.model || message.isStreaming) && <p className="mt-2 text-[10px] text-slate-600">{message.isStreaming ? 'Streaming local response…' : message.model}</p>}
     </div>
   </article>;
+}
+
+function ToolActivityCard({ activity, isStreaming }: { activity: ToolActivity[]; isStreaming: boolean }) {
+  return <div className="tool-activity-card" aria-live="polite">
+    {activity.map((tool) => {
+      const isWeather = tool.name === 'get_current_weather';
+      const isTime = tool.name === 'get_current_time';
+      const label = isWeather ? 'Weather' : isTime ? 'Local time' : tool.name.replaceAll('_', ' ');
+      const detail = isWeather
+        ? tool.location ? `Checking ${tool.location}` : 'Checking Waalwijk'
+        : isTime ? 'Reading local time' : 'Using ATLAS tool';
+      const Icon = isWeather ? CloudSun : isTime ? Clock3 : Wrench;
+      return <div className="tool-activity-item" key={tool.id}>
+        <span className={`tool-activity-icon ${isStreaming ? 'tool-activity-icon-active' : ''}`}><Icon className="size-3.5" /></span>
+        <span className="min-w-0"><strong>{label}</strong><span>{isStreaming ? detail : 'Tool used for this response'}</span></span>
+      </div>;
+    })}
+  </div>;
 }
