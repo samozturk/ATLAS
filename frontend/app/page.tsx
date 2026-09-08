@@ -55,7 +55,7 @@ type StreamPayload = {
 const brains: Record<Brain, { label: string; model: string; description: string; accent: string }> = {
   fast: {
     label: 'Fast brain',
-    model: 'Qwen 3.6 · 35B-A3B',
+    model: 'Qwen 3.6 · 35B',
     description: 'Everyday conversation, quick decisions, and responsive control.',
     accent: 'cyan',
   },

@@ -32,7 +32,7 @@ def test_ollama_provider_translates_messages_and_response() -> None:
         provider = OllamaProvider(Settings(), client=client)
         completion = await provider.complete(
             [ChatMessage(role=MessageRole.USER, content="Hello")],
-            model="qwen3.6:35b-a3b",
+            model="qwen3.6:35b",
         )
         await client.aclose()
 
@@ -44,7 +44,7 @@ def test_ollama_provider_translates_messages_and_response() -> None:
     asyncio.run(exercise())
 
     assert request_payload == {
-        "model": "qwen3.6:35b-a3b",
+        "model": "qwen3.6:35b",
         "messages": [{"role": "user", "content": "Hello"}],
         "stream": False,
     }
@@ -70,7 +70,7 @@ def test_ollama_provider_retries_transient_failures() -> None:
         try:
             await provider.complete(
                 [ChatMessage(role=MessageRole.USER, content="Hello")],
-                model="qwen3.6:35b-a3b",
+                model="qwen3.6:35b",
             )
         except LLMUnavailableError:
             pass
@@ -103,7 +103,7 @@ def test_ollama_provider_streams_normalized_events() -> None:
             (event.type, event.content, event.model)
             async for event in provider.stream(
                 [ChatMessage(role=MessageRole.USER, content="Hello")],
-                model="qwen3.6:35b-a3b",
+                model="qwen3.6:35b",
             )
         ]
         await client.aclose()

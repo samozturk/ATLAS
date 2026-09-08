@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # The provider lives behind an application-owned interface so changing from
     # Ollama later does not change the chat API or future tool policy layer.
     ollama_base_url: str = "http://localhost:11434"
-    fast_model: str = Field(default="qwen3.6:35b-a3b", min_length=1)
+    fast_model: str = Field(default="qwen3.6:35b", min_length=1)
     deep_model: str = Field(default="qwen3.5:122b-a10b", min_length=1)
     llm_connect_timeout_seconds: float = Field(default=5.0, gt=0)
     llm_request_timeout_seconds: float = Field(default=120.0, gt=0)

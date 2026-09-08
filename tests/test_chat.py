@@ -79,7 +79,7 @@ def test_chat_adds_system_prompt_and_returns_provider_reply() -> None:
         ChatMessage(role=MessageRole.SYSTEM, content="System rule."),
         ChatMessage(role=MessageRole.USER, content="Hello"),
     ]
-    assert provider.model == "qwen3.6:35b-a3b"
+    assert provider.model == "qwen3.6:35b"
     assert provider.tools[0].function["name"] == "get_current_time"
     assert provider.closed is True
 
@@ -122,7 +122,7 @@ class ToolCallingProvider:
         model: str,
         tools: Sequence[ToolDefinition] = (),
     ) -> ChatCompletion:
-        assert model == "qwen3.6:35b-a3b"
+        assert model == "qwen3.6:35b"
         assert tools[0].function["name"] == "get_current_time"
         self.requests.append(list(messages))
         if len(self.requests) == 1:
@@ -231,7 +231,7 @@ def test_streaming_chat_continues_after_a_tool_call() -> None:
     events = asyncio.run(exercise())
 
     assert [event.type for event in events] == ["tool_call", "token", "done"]
-    assert events[-1].model == "qwen3.6:35b-a3b"
+    assert events[-1].model == "qwen3.6:35b"
     assert len(provider.requests) == 2
     assert provider.requests[1][-1].role is MessageRole.TOOL
 

@@ -76,12 +76,12 @@ Install and start [Ollama](https://ollama.com), then pull both configured model
 roles:
 
 ```bash
-ollama pull qwen3.6:35b-a3b
+ollama pull qwen3.6:35b
 ollama pull qwen3.5:122b-a10b
 ollama serve
 ```
 
-ATLAS uses the fast brain (`qwen3.6:35b-a3b`) by default. Select the deep brain
+ATLAS uses the fast brain (`qwen3.6:35b`) by default. Select the deep brain
 (`qwen3.5:122b-a10b`) only for complex requests; it has substantially higher
 memory and startup requirements. The tags are configured with `ATLAS_FAST_MODEL`
 and `ATLAS_DEEP_MODEL` in `.env`.
