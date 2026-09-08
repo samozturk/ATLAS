@@ -30,9 +30,9 @@ external service is unavailable. The LLM is behind a provider abstraction and
 is used for interpretation only where rules cannot safely make the decision.
 The tool registry stays application-owned: the model may request a tool, but
 ATLAS validates its arguments, applies an execution timeout, executes only a
-registered tool, and returns a controlled result to the model. The first tool
-is read-only local time; weather, notes, and home-device actions remain out of
-scope until their data source and permission policy are explicit.
+registered tool, and returns a controlled result to the model. The current
+tools are read-only local time and opt-in weather; notes and home-device actions
+remain out of scope until their data source and permission policy are explicit.
 
 ## Dependencies and Python version
 
