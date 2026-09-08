@@ -39,6 +39,17 @@ class ResolvedLocation(BaseModel):
         return ", ".join(parts)
 
 
+# ATLAS's home is intentionally fixed. Keeping these coordinates local avoids a
+# geocoding lookup for every weather request that does not name a place.
+_ATLAS_HOME = ResolvedLocation(
+    name="Waalwijk",
+    admin1="North Brabant",
+    country="Netherlands",
+    latitude=51.6825,
+    longitude=5.0708,
+)
+
+
 class WeatherSnapshot(BaseModel):
     """Normalized current conditions returned to the tool layer."""
 
@@ -119,7 +130,6 @@ class OpenMeteoWeatherClient:
         client: httpx.AsyncClient | None = None,
         clock: Callable[[], float] = monotonic,
     ) -> None:
-        self._default_location = settings.weather_default_location
         self._cache_ttl_seconds = settings.weather_cache_ttl_seconds
         self._clock = clock
         self._owns_client = client is None
@@ -130,9 +140,13 @@ class OpenMeteoWeatherClient:
         self._cache_lock = asyncio.Lock()
 
     async def current(self, location: str | None = None) -> WeatherSnapshot:
-        """Return weather for a requested place or the configured Waalwijk default."""
-        requested_location = (location or self._default_location).strip()
-        cache_key = requested_location.casefold()
+        """Return weather for a named place or ATLAS's hardcoded Waalwijk home."""
+        requested_location = location.strip() if location is not None else None
+        cache_key = (
+            f"location:{requested_location.casefold()}"
+            if requested_location is not None
+            else "home:waalwijk"
+        )
         cached = self._cache.get(cache_key)
         if cached is not None and self._clock() < cached.expires_at:
             return cached.snapshot
@@ -141,7 +155,11 @@ class OpenMeteoWeatherClient:
             cached = self._cache.get(cache_key)
             if cached is not None and self._clock() < cached.expires_at:
                 return cached.snapshot
-            resolved_location = await self._geocode(requested_location)
+            resolved_location = (
+                await self._geocode(requested_location)
+                if requested_location is not None
+                else _ATLAS_HOME
+            )
             snapshot = await self._fetch_current(resolved_location)
             self._cache[cache_key] = _CachedWeather(
                 snapshot=snapshot,

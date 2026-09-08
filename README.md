@@ -117,20 +117,16 @@ Request/connect timeouts and retry settings are listed in `.env.example`.
 ## Tool calling
 
 ATLAS supplies safe, read-only tools. `get_current_time` and
-`get_current_weather` are always available. Weather defaults to Waalwijk,
-Netherlands when no place is named. When the user asks about another place,
-ATLAS resolves that name with [Open-Meteo's geocoding API](https://open-meteo.com/en/docs/geocoding-api),
+`get_current_weather` are always available. Weather without a named place uses
+hardcoded Waalwijk, Netherlands coordinates (51.6825, 5.0708), so it never
+needs a geocoding request. When the user asks about another place, ATLAS
+resolves that name with [Open-Meteo's geocoding API](https://open-meteo.com/en/docs/geocoding-api),
 then queries current conditions with the resolved coordinates. Results are
 cached for ten minutes by default.
 
-Set a different default home place in `.env` if desired:
-
-```bash
-ATLAS_WEATHER_DEFAULT_LOCATION=<home-city-and-country>
-```
-
-Weather is an external request: the default or user-requested place is sent to
-the provider for geocoding and forecast retrieval. `ATLAS_WEATHER_REQUEST_TIMEOUT_SECONDS` and
+Weather is an external request: the hardcoded home coordinates are sent to the
+forecast provider, while a user-requested place is also sent to the geocoding
+provider. `ATLAS_WEATHER_REQUEST_TIMEOUT_SECONDS` and
 `ATLAS_WEATHER_CACHE_TTL_SECONDS` control its bounded request and cache.
 
 Each chat turn allows at most three model-to-tool rounds by default. Configure

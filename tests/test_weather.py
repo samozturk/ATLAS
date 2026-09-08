@@ -45,15 +45,13 @@ def _geocoding_payload(name: str, latitude: float, longitude: float) -> dict[str
     }
 
 
-def test_weather_client_geocodes_the_default_and_requested_locations_then_caches() -> None:
+def test_weather_client_uses_hardcoded_home_and_geocodes_requested_locations_then_caches() -> None:
     geocoding_requests: list[httpx.Request] = []
     forecast_requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "geocoding-api.open-meteo.com":
             geocoding_requests.append(request)
-            if request.url.params["name"] == "Waalwijk, Netherlands":
-                return httpx.Response(200, json=_geocoding_payload("Waalwijk", 51.6825, 5.0708))
             return httpx.Response(200, json=_geocoding_payload("Amsterdam", 52.3676, 4.9041))
         forecast_requests.append(request)
         return httpx.Response(200, json=_weather_payload())
@@ -70,11 +68,11 @@ def test_weather_client_geocodes_the_default_and_requested_locations_then_caches
     default, requested = asyncio.run(exercise())
 
     assert [request.url.params["name"] for request in geocoding_requests] == [
-        "Waalwijk, Netherlands",
         "Amsterdam, Netherlands",
     ]
     assert len(forecast_requests) == 2
     assert forecast_requests[0].url.params["latitude"] == "51.6825"
+    assert forecast_requests[0].url.params["longitude"] == "5.0708"
     assert forecast_requests[1].url.params["longitude"] == "4.9041"
     assert default.location == "Waalwijk, North Brabant, Netherlands"
     assert requested.location == "Amsterdam, Netherlands"
