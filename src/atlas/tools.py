@@ -7,9 +7,12 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+import structlog
 
 from atlas.llm.models import ChatMessage, MessageRole, ToolCall, ToolDefinition
-from atlas.weather import WeatherSnapshot
+from atlas.weather import WeatherError, WeatherSnapshot
+
+log = structlog.get_logger(__name__)
 
 
 class ToolInput(BaseModel):
@@ -39,6 +42,10 @@ class ToolExecution(BaseModel):
                 separators=(",", ":"),
             ),
         )
+
+
+class ToolExecutionFailure(Exception):
+    """A known, safe error that should be returned to the model and user."""
 
 
 class AtlasTool(Protocol):
@@ -127,7 +134,10 @@ class CurrentWeatherTool:
         )
 
     async def execute(self, arguments: CurrentWeatherInput) -> str:
-        snapshot = await self._reader.current(arguments.location)
+        try:
+            snapshot = await self._reader.current(arguments.location)
+        except WeatherError as error:
+            raise ToolExecutionFailure(str(error)) from error
         return json.dumps(snapshot.model_dump(mode="json"), separators=(",", ":"))
 
 
@@ -178,9 +188,25 @@ class ToolRegistry:
                 ok=False,
                 content="Tool execution timed out.",
             )
-        except Exception:
-            # The model receives a controlled failure message; implementation
-            # details remain in server logs once observability is added.
+        except ToolExecutionFailure as error:
+            log.warning(
+                "tool.execution_failed",
+                tool_name=tool_name,
+                error_type=type(error.__cause__).__name__,
+                detail=str(error),
+            )
+            return ToolExecution(
+                tool_call_id=tool_call.id,
+                tool_name=tool_name,
+                ok=False,
+                content=str(error),
+            )
+        except Exception as error:
+            log.exception(
+                "tool.execution_failed",
+                tool_name=tool_name,
+                error_type=type(error).__name__,
+            )
             return ToolExecution(
                 tool_call_id=tool_call.id,
                 tool_name=tool_name,

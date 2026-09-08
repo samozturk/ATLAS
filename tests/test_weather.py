@@ -135,3 +135,22 @@ def test_weather_tool_forwards_an_optional_user_requested_location() -> None:
     assert result.ok is True
     assert reader.requested_location == "Amsterdam, Netherlands"
     assert json.loads(result.content)["location"] == "Amsterdam, Netherlands"
+
+
+def test_weather_tool_returns_a_safe_location_lookup_error() -> None:
+    class MissingWeatherReader:
+        async def current(self, location: str | None = None) -> WeatherSnapshot:
+            del location
+            raise WeatherLocationNotFoundError("ATLAS could not find a weather location for 'Nowhereville'.")
+
+    registry = ToolRegistry([CurrentWeatherTool(MissingWeatherReader())], execution_timeout_seconds=1)
+
+    async def exercise():
+        return await registry.execute(
+            ToolCall(function=ToolFunction(name="get_current_weather", arguments={}))
+        )
+
+    result = asyncio.run(exercise())
+
+    assert result.ok is False
+    assert result.content == "ATLAS could not find a weather location for 'Nowhereville'."
