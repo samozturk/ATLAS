@@ -32,6 +32,8 @@ import {
   Wrench,
   Zap,
 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -508,11 +510,27 @@ function MessageBubble({ message }: { message: Message }) {
     {isAssistant && <div className={`message-avatar ${message.brain === 'deep' ? 'avatar-deep' : ''}`} aria-hidden="true"><Sparkles className="size-3.5" /></div>}
     <div className="min-w-0">
       {isAssistant && <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">ATLAS{selectedBrain && <span className={`brain-badge brain-badge-${selectedBrain.accent}`}>{selectedBrain.label}</span>}</div>}
-      <div className={`message-bubble ${isAssistant ? 'assistant-bubble' : 'user-bubble'}`}>{message.content || <span className="typing-dots"><i /><i /><i /></span>}</div>
+      <div className={`message-bubble ${isAssistant ? 'assistant-bubble' : 'user-bubble'}`}>
+        {message.content
+          ? isAssistant
+            ? <AssistantMarkdown content={message.content} />
+            : message.content
+          : <span className="typing-dots"><i /><i /><i /></span>}
+      </div>
       {isAssistant && message.toolActivity?.length ? <ToolActivityCard activity={message.toolActivity} isStreaming={message.isStreaming ?? false} /> : null}
       {isAssistant && (message.model || message.isStreaming) && <p className="mt-2 text-[10px] text-slate-600">{message.isStreaming ? 'Streaming local response…' : message.model}</p>}
     </div>
   </article>;
+}
+
+function AssistantMarkdown({ content }: { content: string }) {
+  return <div className="markdown-content"><ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      skipHtml
+      components={{
+        a: ({ href, children }) => <a href={href} target="_blank" rel="noreferrer">{children}</a>,
+      }}
+    >{content}</ReactMarkdown></div>;
 }
 
 function ToolActivityCard({ activity, isStreaming }: { activity: ToolActivity[]; isStreaming: boolean }) {
