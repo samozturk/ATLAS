@@ -1,0 +1,133 @@
+"""Read-only, path-safe access to a local Obsidian Markdown vault."""
+
+import re
+from pathlib import Path
+
+from pydantic import BaseModel, Field
+
+
+class ObsidianError(Exception):
+    """A safe failure while accessing the locally configured vault."""
+
+
+class ObsidianNoteNotFoundError(ObsidianError):
+    """The requested Markdown note does not exist inside the vault."""
+
+
+class ObsidianSearchResult(BaseModel):
+    """A compact result the model can use to select a note to read."""
+
+    path: str
+    title: str
+    excerpt: str
+
+
+class ObsidianNote(BaseModel):
+    """The text of one Markdown note resolved inside the vault."""
+
+    path: str
+    content: str
+
+
+class ObsidianVault:
+    """Search and read Markdown without allowing access outside the vault root."""
+
+    _max_note_bytes = 512 * 1024
+
+    def __init__(self, root_path: str) -> None:
+        # Path("") resolves to the current working directory, which would make
+        # an unconfigured vault silently expose application files.
+        self._configured_root = (
+            Path(root_path).expanduser()
+            if root_path.strip()
+            else Path("/__atlas_unconfigured_obsidian_vault__")
+        )
+
+    def search(self, query: str, *, limit: int = 5) -> list[ObsidianSearchResult]:
+        """Return path, title, and a bounded excerpt for matching Markdown notes."""
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise ObsidianError("A note search needs a non-empty query.")
+        matcher = re.compile(re.escape(normalized_query), re.IGNORECASE)
+        matches: list[ObsidianSearchResult] = []
+        root = self._root()
+        for candidate in sorted(root.rglob("*.md")):
+            note_path = self._safe_markdown_path(candidate)
+            if note_path is None:
+                continue
+            relative_path = note_path.relative_to(root).as_posix()
+            content = self._read_text(note_path)
+            found = matcher.search(relative_path) or matcher.search(content)
+            if found is None:
+                continue
+            matches.append(
+                ObsidianSearchResult(
+                    path=relative_path,
+                    title=_title_from(relative_path, content),
+                    excerpt=_excerpt(content if matcher.search(content) else relative_path, found),
+                )
+            )
+            if len(matches) >= limit:
+                break
+        return matches
+
+    def read(self, relative_path: str) -> ObsidianNote:
+        """Read one requested relative Markdown path after resolving it safely."""
+        root = self._root()
+        candidate = Path(relative_path)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise ObsidianNoteNotFoundError("ATLAS could not find that Obsidian note.")
+        resolved = self._safe_markdown_path(root / candidate)
+        if resolved is None or not resolved.is_file():
+            raise ObsidianNoteNotFoundError("ATLAS could not find that Obsidian note.")
+        return ObsidianNote(
+            path=resolved.relative_to(root).as_posix(),
+            content=self._read_text(resolved),
+        )
+
+    def _root(self) -> Path:
+        try:
+            root = self._configured_root.resolve(strict=True)
+        except OSError as error:
+            raise ObsidianError("The configured Obsidian vault is unavailable.") from error
+        if not root.is_dir():
+            raise ObsidianError("The configured Obsidian vault is unavailable.")
+        return root
+
+    def _safe_markdown_path(self, path: Path) -> Path | None:
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError:
+            return None
+        root = self._root()
+        if resolved.suffix.lower() != ".md" or not resolved.is_relative_to(root):
+            return None
+        return resolved
+
+    def _read_text(self, path: Path) -> str:
+        try:
+            if path.stat().st_size > self._max_note_bytes:
+                raise ObsidianError("That Obsidian note is too large for ATLAS to read safely.")
+            return path.read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            raise ObsidianError("ATLAS could not read that Obsidian note.") from error
+
+
+def _title_from(relative_path: str, content: str) -> str:
+    for line in content.splitlines():
+        if line.startswith("#"):
+            title = line.lstrip("#").strip()
+            if title:
+                return title
+    return Path(relative_path).stem
+
+
+def _excerpt(content: str, match: re.Match[str], *, maximum: int = 240) -> str:
+    start = max(0, match.start() - 80)
+    end = min(len(content), match.end() + 160)
+    excerpt = " ".join(content[start:end].split())
+    if start:
+        excerpt = f"…{excerpt}"
+    if end < len(content):
+        excerpt = f"{excerpt}…"
+    return excerpt[:maximum]

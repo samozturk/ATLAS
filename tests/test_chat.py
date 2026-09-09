@@ -255,7 +255,10 @@ def test_chat_selects_the_deep_model() -> None:
 
 def test_chat_registers_weather_with_the_waalwijk_default() -> None:
     provider = FakeProvider()
-    app = create_app(Settings(environment="test"), provider=provider)
+    app = create_app(
+        Settings(environment="test", obsidian_vault_path="/configured/obsidian/vault"),
+        provider=provider,
+    )
 
     with TestClient(app) as client:
         response = client.post("/chat", json={"messages": [{"role": "user", "content": "Hello"}]})
@@ -264,6 +267,8 @@ def test_chat_registers_weather_with_the_waalwijk_default() -> None:
     assert [tool.function["name"] for tool in provider.tools] == [
         "get_current_time",
         "get_current_weather",
+        "search_obsidian_notes",
+        "read_obsidian_note",
     ]
 
 

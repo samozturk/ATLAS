@@ -25,7 +25,14 @@ from atlas.llm.ollama import OllamaProvider
 from atlas.llm.provider import LLMError, LLMProvider
 from atlas.llm.service import ChatService
 from atlas.logging import configure_logging
-from atlas.tools import CurrentTimeTool, CurrentWeatherTool, ToolRegistry
+from atlas.obsidian import ObsidianVault
+from atlas.tools import (
+    CurrentTimeTool,
+    CurrentWeatherTool,
+    ReadObsidianNoteTool,
+    SearchObsidianNotesTool,
+    ToolRegistry,
+)
 from atlas.weather import OpenMeteoWeatherClient
 
 log = structlog.get_logger(__name__)
@@ -72,6 +79,15 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
     registered_tools = [CurrentTimeTool()]
     app.state.weather_client = OpenMeteoWeatherClient(settings)
     registered_tools.append(CurrentWeatherTool(app.state.weather_client))
+    app.state.obsidian_vault = None
+    if settings.obsidian_vault_path.strip():
+        app.state.obsidian_vault = ObsidianVault(settings.obsidian_vault_path)
+        registered_tools.extend(
+            [
+                SearchObsidianNotesTool(app.state.obsidian_vault),
+                ReadObsidianNoteTool(app.state.obsidian_vault),
+            ]
+        )
     app.state.chat_service = ChatService(
         settings,
         app.state.llm_provider,

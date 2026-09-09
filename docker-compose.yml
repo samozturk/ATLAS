@@ -3,12 +3,15 @@ services:
     build: .
     env_file:
       - .env
+    environment:
+      ATLAS_OBSIDIAN_VAULT_PATH: /obsidian
     ports:
       - "8000:8000"
     init: true
     restart: unless-stopped
     volumes:
       - atlas-data:/app/data
+      - ${ATLAS_OBSIDIAN_HOST_VAULT_PATH:-/Users/sam/Documents/Obsidian Vault}:/obsidian:ro
 
   frontend:
     build:

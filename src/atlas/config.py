@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     agent_max_tool_rounds: int = Field(default=3, ge=1, le=8)
     tool_execution_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
     database_path: str = "data/atlas.db"
+    # Direct local runs use the host path; Docker overrides this to /obsidian
+    # while mounting the configured host vault read-only at that location.
+    obsidian_vault_path: str = ""
     weather_request_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     weather_cache_ttl_seconds: int = Field(default=600, ge=60, le=3600)
     llm_system_prompt: str = (
@@ -45,7 +48,9 @@ class Settings(BaseSettings):
         "personable; a little dry wit is welcome when it fits, never at the expense of clarity. "
         "Be concise by default, but expand when a decision needs context. Respect privacy and "
         "the user's agency. Use an available tool for current home information rather than "
-        "guessing. Be candid about uncertainty and limitations. Never claim to have "
+        "guessing. Search the local Obsidian notes when the user asks about their saved "
+        "knowledge, plans, or notes; do not claim to have read a note without the tool result. "
+        "Be candid about uncertainty and limitations. Never claim to have "
         "taken an action, accessed a device, remembered information, or observed the home "
         "unless a tool result confirms it. Ask a focused follow-up only when it is needed."
     )

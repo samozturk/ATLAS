@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 import structlog
 
 from atlas.llm.models import ChatMessage, MessageRole, ToolCall, ToolDefinition
+from atlas.obsidian import ObsidianError, ObsidianVault
 from atlas.weather import WeatherError, WeatherSnapshot
 
 log = structlog.get_logger(__name__)
@@ -139,6 +140,81 @@ class CurrentWeatherTool:
         except WeatherError as error:
             raise ToolExecutionFailure(str(error)) from error
         return json.dumps(snapshot.model_dump(mode="json"), separators=(",", ":"))
+
+
+class SearchObsidianNotesInput(ToolInput):
+    """A focused query used to find relevant private Markdown notes."""
+
+    query: str = Field(min_length=2, max_length=200)
+    limit: int = Field(default=5, ge=1, le=10)
+
+
+class SearchObsidianNotesTool:
+    """Search the configured Obsidian vault without changing it."""
+
+    name = "search_obsidian_notes"
+    description = (
+        "Search the user's local Obsidian Markdown notes. Use this before reading a note when "
+        "the user asks about their private notes, plans, or saved knowledge. This tool is read-only."
+    )
+    input_model = SearchObsidianNotesInput
+
+    def __init__(self, vault: ObsidianVault) -> None:
+        self._vault = vault
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            function={
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_model.model_json_schema(),
+            }
+        )
+
+    async def execute(self, arguments: SearchObsidianNotesInput) -> str:
+        try:
+            results = self._vault.search(arguments.query, limit=arguments.limit)
+        except ObsidianError as error:
+            raise ToolExecutionFailure(str(error)) from error
+        return json.dumps([result.model_dump(mode="json") for result in results], separators=(",", ":"))
+
+
+class ReadObsidianNoteInput(ToolInput):
+    """A relative note path returned by the Obsidian search tool."""
+
+    path: str = Field(min_length=3, max_length=500)
+
+
+class ReadObsidianNoteTool:
+    """Read one Markdown note already selected from the configured vault."""
+
+    name = "read_obsidian_note"
+    description = (
+        "Read one local Obsidian Markdown note by the relative path returned by search_obsidian_notes. "
+        "This tool is read-only."
+    )
+    input_model = ReadObsidianNoteInput
+
+    def __init__(self, vault: ObsidianVault) -> None:
+        self._vault = vault
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            function={
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_model.model_json_schema(),
+            }
+        )
+
+    async def execute(self, arguments: ReadObsidianNoteInput) -> str:
+        try:
+            note = self._vault.read(arguments.path)
+        except ObsidianError as error:
+            raise ToolExecutionFailure(str(error)) from error
+        return json.dumps(note.model_dump(mode="json"), separators=(",", ":"))
 
 
 class ToolRegistry:

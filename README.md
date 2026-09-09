@@ -133,6 +133,23 @@ Each chat turn allows at most three model-to-tool rounds by default. Configure
 `ATLAS_AGENT_MAX_TOOL_ROUNDS` and `ATLAS_TOOL_EXECUTION_TIMEOUT_SECONDS` in
 `.env` only when a future tool requires different limits.
 
+## Obsidian notes
+
+ATLAS can search and read Markdown notes from a local Obsidian vault. The
+integration is read-only: it exposes `search_obsidian_notes` and
+`read_obsidian_note`, and rejects paths outside the configured vault.
+
+For a direct local run, set this in `.env`:
+
+```bash
+ATLAS_OBSIDIAN_VAULT_PATH=/Users/sam/Documents/Obsidian\ Vault
+```
+
+For Docker, set `ATLAS_OBSIDIAN_HOST_VAULT_PATH` to the host-side vault path.
+Compose mounts it at `/obsidian` read-only and sets the container's runtime
+path automatically. The supplied `.env.example` is configured for your vault.
+ATLAS does not create or modify notes yet.
+
 ## Chat interface
 
 The React interface lives in `frontend/`. It is a local companion to the ATLAS
