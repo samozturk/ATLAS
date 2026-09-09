@@ -256,7 +256,11 @@ def test_chat_selects_the_deep_model() -> None:
 def test_chat_registers_weather_with_the_waalwijk_default() -> None:
     provider = FakeProvider()
     app = create_app(
-        Settings(environment="test", obsidian_vault_path="/configured/obsidian/vault"),
+        Settings(
+            environment="test",
+            obsidian_vault_path="/configured/obsidian/vault",
+            obsidian_write_enabled=True,
+        ),
         provider=provider,
     )
 
@@ -269,6 +273,7 @@ def test_chat_registers_weather_with_the_waalwijk_default() -> None:
         "get_current_weather",
         "search_obsidian_notes",
         "read_obsidian_note",
+        "write_obsidian_note",
     ]
 
 

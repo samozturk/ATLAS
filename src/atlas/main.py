@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 import structlog
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -17,6 +17,7 @@ from atlas.conversations import (
     ConversationStore,
     ConversationSummary,
     StoredConversation,
+    StoredEvent,
     StoredToolActivity,
 )
 from atlas.events import AtlasEvent
@@ -25,6 +26,7 @@ from atlas.llm.ollama import OllamaProvider
 from atlas.llm.provider import LLMError, LLMProvider
 from atlas.llm.service import ChatService
 from atlas.logging import configure_logging
+from atlas.mqtt import MQTTEventAdapter
 from atlas.obsidian import ObsidianVault
 from atlas.tools import (
     CurrentTimeTool,
@@ -32,6 +34,7 @@ from atlas.tools import (
     ReadObsidianNoteTool,
     SearchObsidianNotesTool,
     ToolRegistry,
+    WriteObsidianNoteTool,
 )
 from atlas.weather import OpenMeteoWeatherClient
 
@@ -50,12 +53,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Readiness changes only at lifecycle boundaries, leaving room to initialize
     # databases, workers, and event-bus connections before accepting traffic.
     app.state.conversation_store.initialize()
+    app.state.mqtt_task = None
+    if settings.mqtt_enabled:
+        app.state.mqtt_task = asyncio.create_task(app.state.mqtt_adapter.run(), name="atlas-mqtt")
     app.state.ready = True
     log.info("atlas.started", system_event=AtlasEvent(type="system.started").model_dump(mode="json"))
     try:
         yield
     finally:
         app.state.ready = False
+        mqtt_task: asyncio.Task[None] | None = app.state.mqtt_task
+        if mqtt_task is not None:
+            mqtt_task.cancel()
+            await asyncio.gather(mqtt_task, return_exceptions=True)
         await app.state.llm_provider.aclose()
         weather_client: OpenMeteoWeatherClient | None = app.state.weather_client
         if weather_client is not None:
@@ -75,6 +85,7 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
     app.state.settings = settings
     app.state.ready = False
     app.state.conversation_store = ConversationStore(settings.database_path)
+    app.state.mqtt_adapter = MQTTEventAdapter(settings, app.state.conversation_store.record_event)
     app.state.llm_provider = provider or OllamaProvider(settings)
     registered_tools = [CurrentTimeTool()]
     app.state.weather_client = OpenMeteoWeatherClient(settings)
@@ -88,6 +99,8 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
                 ReadObsidianNoteTool(app.state.obsidian_vault),
             ]
         )
+        if settings.obsidian_write_enabled:
+            registered_tools.append(WriteObsidianNoteTool(app.state.obsidian_vault))
     app.state.chat_service = ChatService(
         settings,
         app.state.llm_provider,
@@ -140,6 +153,10 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
         if not app.state.ready:
             return HealthStatus(status="starting", service=settings.app_name, environment=settings.environment)
         return HealthStatus(status="ok", service=settings.app_name, environment=settings.environment)
+
+    @app.get("/events", response_model=list[StoredEvent], tags=["events"])
+    async def list_events(limit: int = Query(default=50, ge=1, le=200)) -> list[StoredEvent]:
+        return app.state.conversation_store.list_events(limit=limit)
 
     @app.post("/conversations", response_model=ConversationSummary, status_code=status.HTTP_201_CREATED, tags=["conversations"])
     async def create_conversation() -> ConversationSummary:

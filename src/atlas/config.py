@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,9 +36,23 @@ class Settings(BaseSettings):
     agent_max_tool_rounds: int = Field(default=3, ge=1, le=8)
     tool_execution_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
     database_path: str = "data/atlas.db"
-    # Direct local runs use the host path; Docker overrides this to /obsidian
-    # while mounting the configured host vault read-only at that location.
+    # Direct local runs use the host path; Docker overrides this to /obsidian.
+    # The host vault stays read-only unless its separately configured mount mode
+    # and this write feature flag are both explicitly enabled.
     obsidian_vault_path: str = ""
+    obsidian_write_enabled: bool = False
+    # MQTT intake is opt-in and read-only. Messages are accepted only beneath
+    # mqtt_event_topic_prefix, e.g. atlas/events/temperature.changed.
+    mqtt_enabled: bool = False
+    mqtt_host: str = ""
+    mqtt_port: int = Field(default=1883, ge=1, le=65535)
+    mqtt_username: str = ""
+    mqtt_password: SecretStr | None = None
+    mqtt_client_id: str = Field(default="atlas", min_length=1, max_length=64)
+    mqtt_topic_filter: str = Field(default="atlas/events/#", min_length=1, max_length=256)
+    mqtt_event_topic_prefix: str = Field(default="atlas/events", min_length=1, max_length=240)
+    mqtt_reconnect_delay_seconds: float = Field(default=5.0, ge=1, le=60)
+    mqtt_max_payload_bytes: int = Field(default=32_768, ge=256, le=1_048_576)
     weather_request_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     weather_cache_ttl_seconds: int = Field(default=600, ge=60, le=3600)
     llm_system_prompt: str = (
@@ -50,6 +64,8 @@ class Settings(BaseSettings):
         "the user's agency. Use an available tool for current home information rather than "
         "guessing. Search the local Obsidian notes when the user asks about their saved "
         "knowledge, plans, or notes; do not claim to have read a note without the tool result. "
+        "Write or replace an Obsidian note only when the user explicitly asks you to save it; "
+        "never overwrite a note unless the user explicitly requests replacement. "
         "Be candid about uncertainty and limitations. Never claim to have "
         "taken an action, accessed a device, remembered information, or observed the home "
         "unless a tool result confirms it. Ask a focused follow-up only when it is needed."

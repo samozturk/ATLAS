@@ -217,6 +217,48 @@ class ReadObsidianNoteTool:
         return json.dumps(note.model_dump(mode="json"), separators=(",", ":"))
 
 
+class WriteObsidianNoteInput(ToolInput):
+    """A requested Markdown note and the content explicitly approved by the user."""
+
+    path: str = Field(min_length=3, max_length=500)
+    content: str = Field(min_length=1, max_length=500_000)
+    overwrite: bool = False
+
+
+class WriteObsidianNoteTool:
+    """Create or explicitly replace a Markdown note after a direct user request."""
+
+    name = "write_obsidian_note"
+    description = (
+        "Create a Markdown note in the user's local Obsidian vault only when the user explicitly asks "
+        "to save or create it. To replace an existing note, the user must explicitly request replacement "
+        "and overwrite must be true. Never use this tool proactively."
+    )
+    input_model = WriteObsidianNoteInput
+
+    def __init__(self, vault: ObsidianVault) -> None:
+        self._vault = vault
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            function={
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_model.model_json_schema(),
+            }
+        )
+
+    async def execute(self, arguments: WriteObsidianNoteInput) -> str:
+        try:
+            result = self._vault.write(
+                arguments.path, arguments.content, overwrite=arguments.overwrite
+            )
+        except ObsidianError as error:
+            raise ToolExecutionFailure(str(error)) from error
+        return json.dumps(result.model_dump(mode="json"), separators=(",", ":"))
+
+
 class ToolRegistry:
     """Validate and execute only the tools explicitly registered by ATLAS."""
 

@@ -11,7 +11,7 @@ services:
     restart: unless-stopped
     volumes:
       - atlas-data:/app/data
-      - ${ATLAS_OBSIDIAN_HOST_VAULT_PATH:-/Users/sam/Documents/Obsidian Vault}:/obsidian:ro
+      - ${ATLAS_OBSIDIAN_HOST_VAULT_PATH:-/Users/sam/Documents/Obsidian Vault}:/obsidian:${ATLAS_OBSIDIAN_MOUNT_MODE:-ro}
 
   frontend:
     build:

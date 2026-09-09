@@ -10,6 +10,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from atlas.llm.models import Brain, ConversationMessage
+from atlas.events import AtlasEvent
 
 
 class ConversationNotFoundError(LookupError):
@@ -56,6 +57,12 @@ class StoredConversation(ConversationSummary):
     messages: list[StoredMessage]
 
 
+class StoredEvent(AtlasEvent):
+    """An incoming home event retained for the local event feed and audit history."""
+
+    received_at: datetime
+
+
 class ConversationStore:
     """Own the SQLite schema and keep all persistent state on the ATLAS host."""
 
@@ -96,6 +103,16 @@ class ConversationStore:
                 );
                 CREATE INDEX IF NOT EXISTS tool_activity_message_id
                     ON tool_activity(message_id, id);
+                CREATE TABLE IF NOT EXISTS events (
+                    id TEXT PRIMARY KEY,
+                    type TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    correlation_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    received_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS events_received_at ON events(received_at DESC);
                 """
             )
 
@@ -197,6 +214,48 @@ class ConversationStore:
                 (title, _dump_time(now), conversation_id),
             )
         return message
+
+    def record_event(self, event: AtlasEvent) -> StoredEvent:
+        """Persist one normalized event before any future rule or LLM consumer sees it."""
+        received_at = _now()
+        stored_event = StoredEvent(**event.model_dump(), received_at=received_at)
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO events "
+                "(id, type, source, occurred_at, correlation_id, payload_json, received_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(stored_event.id),
+                    stored_event.type,
+                    stored_event.source,
+                    _dump_time(stored_event.occurred_at),
+                    str(stored_event.correlation_id),
+                    json.dumps(stored_event.payload, separators=(",", ":")),
+                    _dump_time(stored_event.received_at),
+                ),
+            )
+        return stored_event
+
+    def list_events(self, *, limit: int = 50) -> list[StoredEvent]:
+        """Read the newest local home events without exposing broker internals."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, type, source, occurred_at, correlation_id, payload_json, received_at "
+                "FROM events ORDER BY received_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [
+            StoredEvent(
+                id=row["id"],
+                type=row["type"],
+                source=row["source"],
+                occurred_at=_load_time(row["occurred_at"]),
+                correlation_id=row["correlation_id"],
+                payload=json.loads(row["payload_json"]),
+                received_at=_load_time(row["received_at"]),
+            )
+            for row in rows
+        ]
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._database_path)

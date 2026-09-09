@@ -1,6 +1,8 @@
 """Read-only, path-safe access to a local Obsidian Markdown vault."""
 
 import re
+import os
+import tempfile
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -12,6 +14,10 @@ class ObsidianError(Exception):
 
 class ObsidianNoteNotFoundError(ObsidianError):
     """The requested Markdown note does not exist inside the vault."""
+
+
+class ObsidianNoteExistsError(ObsidianError):
+    """A write would replace an existing note without explicit authorization."""
 
 
 class ObsidianSearchResult(BaseModel):
@@ -29,8 +35,15 @@ class ObsidianNote(BaseModel):
     content: str
 
 
+class ObsidianWriteResult(BaseModel):
+    """The durable result of creating or explicitly replacing one Markdown note."""
+
+    path: str
+    action: str
+
+
 class ObsidianVault:
-    """Search and read Markdown without allowing access outside the vault root."""
+    """Search, read, and explicitly write Markdown without escaping the vault root."""
 
     _max_note_bytes = 512 * 1024
 
@@ -85,6 +98,36 @@ class ObsidianVault:
             content=self._read_text(resolved),
         )
 
+    def write(
+        self, relative_path: str, content: str, *, overwrite: bool = False
+    ) -> ObsidianWriteResult:
+        """Create a note atomically, replacing an existing note only when requested."""
+        if len(content.encode("utf-8")) > self._max_note_bytes:
+            raise ObsidianError("That Obsidian note is too large for ATLAS to write safely.")
+        root = self._root()
+        candidate = Path(relative_path)
+        if candidate.is_absolute() or ".." in candidate.parts or candidate.suffix.lower() != ".md":
+            raise ObsidianError("ATLAS can write only Markdown notes inside the configured Obsidian vault.")
+        try:
+            parent = (root / candidate.parent).resolve(strict=True)
+        except OSError as error:
+            raise ObsidianError("ATLAS could not find the target Obsidian folder.") from error
+        if not parent.is_relative_to(root) or not parent.is_dir():
+            raise ObsidianError("ATLAS could not find the target Obsidian folder.")
+        target = parent / candidate.name
+        if target.exists():
+            if self._safe_markdown_path(target) is None:
+                raise ObsidianError("ATLAS can write only Markdown notes inside the configured Obsidian vault.")
+            if not overwrite:
+                raise ObsidianNoteExistsError(
+                    "That Obsidian note already exists. Ask ATLAS explicitly to replace it."
+                )
+            action = "updated"
+        else:
+            action = "created"
+        self._atomic_write(target, content)
+        return ObsidianWriteResult(path=(candidate.parent / target.name).as_posix(), action=action)
+
     def _root(self) -> Path:
         try:
             root = self._configured_root.resolve(strict=True)
@@ -111,6 +154,27 @@ class ObsidianVault:
             return path.read_text(encoding="utf-8", errors="replace")
         except OSError as error:
             raise ObsidianError("ATLAS could not read that Obsidian note.") from error
+
+    @staticmethod
+    def _atomic_write(target: Path, content: str) -> None:
+        temporary_path: str | None = None
+        try:
+            descriptor, temporary_path = tempfile.mkstemp(
+                dir=target.parent, prefix=".atlas-", suffix=".tmp"
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as temporary_file:
+                temporary_file.write(content)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            os.replace(temporary_path, target)
+        except OSError as error:
+            raise ObsidianError("ATLAS could not write that Obsidian note.") from error
+        finally:
+            if temporary_path is not None:
+                try:
+                    Path(temporary_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 def _title_from(relative_path: str, content: str) -> str:

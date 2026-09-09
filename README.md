@@ -135,9 +135,9 @@ Each chat turn allows at most three model-to-tool rounds by default. Configure
 
 ## Obsidian notes
 
-ATLAS can search and read Markdown notes from a local Obsidian vault. The
-integration is read-only: it exposes `search_obsidian_notes` and
-`read_obsidian_note`, and rejects paths outside the configured vault.
+ATLAS can search, read, and—when explicitly enabled—write Markdown notes in a
+local Obsidian vault. It exposes `search_obsidian_notes`, `read_obsidian_note`,
+and `write_obsidian_note`, and rejects paths outside the configured vault.
 
 For a direct local run, set this in `.env`:
 
@@ -148,7 +148,41 @@ ATLAS_OBSIDIAN_VAULT_PATH=/Users/sam/Documents/Obsidian\ Vault
 For Docker, set `ATLAS_OBSIDIAN_HOST_VAULT_PATH` to the host-side vault path.
 Compose mounts it at `/obsidian` read-only and sets the container's runtime
 path automatically. The supplied `.env.example` is configured for your vault.
-ATLAS does not create or modify notes yet.
+
+Writing is deliberately off by default. To allow ATLAS to create notes and to
+replace a note only when the user explicitly requests it, set both values in
+your Docker `.env` and recreate the container:
+
+```bash
+ATLAS_OBSIDIAN_WRITE_ENABLED=true
+ATLAS_OBSIDIAN_MOUNT_MODE=rw
+```
+
+Each write is atomic, constrained to an existing folder inside the vault, and
+recorded in the conversation's tool history. A write will not replace an
+existing note unless the tool request has `overwrite: true`; ATLAS is prompted
+to set that only after an explicit user request.
+
+## MQTT home events
+
+ATLAS now has an opt-in, read-only MQTT intake adapter. It subscribes to
+`atlas/events/#` by default and stores accepted messages in the local event
+feed, available at `GET /events`. The adapter never publishes device commands.
+
+Enable it only after configuring your broker in `.env`:
+
+```bash
+ATLAS_MQTT_ENABLED=true
+ATLAS_MQTT_HOST=<your-broker-hostname-or-ip>
+ATLAS_MQTT_USERNAME=<optional-username>
+ATLAS_MQTT_PASSWORD=<optional-password>
+```
+
+Publish JSON or plain-text payloads under the event namespace. For example,
+an ESP32 may publish a hallway temperature reading to
+`atlas/events/temperature.changed`. ATLAS records it as the normalized
+`temperature.changed` event with the original topic and payload. Messages
+outside `ATLAS_MQTT_EVENT_TOPIC_PREFIX` and payloads over 32 KiB are rejected.
 
 ## Chat interface
 
