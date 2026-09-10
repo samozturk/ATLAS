@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     agent_max_tool_rounds: int = Field(default=3, ge=1, le=8)
     tool_execution_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
     database_path: str = "data/atlas.db"
+    # Review only an idle conversation, and keep the resulting profile local.
+    memory_idle_seconds: int = Field(default=300, ge=60, le=86_400)
+    memory_scan_interval_seconds: int = Field(default=60, ge=15, le=3_600)
+    memory_max_facts_per_conversation: int = Field(default=8, ge=1, le=20)
     # Direct local runs use the host path; Docker overrides this to /obsidian.
     # The host vault stays read-only unless its separately configured mount mode
     # and this write feature flag are both explicitly enabled.

@@ -202,6 +202,19 @@ The database defaults to `data/atlas.db`; change `ATLAS_DATABASE_PATH` only if
 you need a different local path. Docker mounts `/app/data` as the named
 `atlas-data` volume, so conversation history survives container recreation.
 
+## Personal memory
+
+The Memory view includes an inspectable “What ATLAS remembers about you”
+profile. Five minutes after a conversation becomes idle, ATLAS uses the local
+fast model to review only the user's messages for explicit, durable facts—such
+as stated preferences, household conventions, or long-lived projects. It
+deduplicates those facts and saves them in the same local SQLite database.
+
+It does not infer facts or retain credentials, financial information, medical
+or legal information, or precise/live location. Change the idle delay, polling
+interval, or per-conversation cap with `ATLAS_MEMORY_IDLE_SECONDS`,
+`ATLAS_MEMORY_SCAN_INTERVAL_SECONDS`, and `ATLAS_MEMORY_MAX_FACTS_PER_CONVERSATION`.
+
 For Tailnet access, Compose allows the configured Studio hostname (`cortex`) to
 reach Vite. If you rename that machine or use a different MagicDNS hostname,
 change `ATLAS_UI_ALLOWED_HOSTS` in `docker-compose.yml` (a comma-separated list

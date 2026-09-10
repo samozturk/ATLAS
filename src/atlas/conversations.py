@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -63,6 +64,25 @@ class StoredEvent(AtlasEvent):
     received_at: datetime
 
 
+class PersonalMemory(BaseModel):
+    """A reviewed, local fact ATLAS may use to maintain continuity."""
+
+    id: str
+    fact: str
+    category: str
+    source_conversation_id: str
+    created_at: datetime
+    last_confirmed_at: datetime
+
+
+class PendingPersonalMemoryScan(BaseModel):
+    """An idle conversation whose user messages have not yet been reviewed."""
+
+    conversation_id: str
+    updated_at: datetime
+    user_messages: list[StoredMessage]
+
+
 class ConversationStore:
     """Own the SQLite schema and keep all persistent state on the ATLAS host."""
 
@@ -79,7 +99,8 @@ class ConversationStore:
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    memory_scanned_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS messages (
                     id TEXT PRIMARY KEY,
@@ -113,8 +134,24 @@ class ConversationStore:
                     received_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS events_received_at ON events(received_at DESC);
+                CREATE TABLE IF NOT EXISTS personal_memories (
+                    id TEXT PRIMARY KEY,
+                    fact TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL UNIQUE,
+                    source_conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                    created_at TEXT NOT NULL,
+                    last_confirmed_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS personal_memories_last_confirmed_at
+                    ON personal_memories(last_confirmed_at DESC);
                 """
             )
+            # Existing installations predate memory_scanned_at. SQLite does not
+            # support ADD COLUMN IF NOT EXISTS, so make this migration explicit.
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(conversations)")}
+            if "memory_scanned_at" not in columns:
+                connection.execute("ALTER TABLE conversations ADD COLUMN memory_scanned_at TEXT")
 
     def create_conversation(self) -> ConversationSummary:
         now = _now()
@@ -253,6 +290,106 @@ class ConversationStore:
                 correlation_id=row["correlation_id"],
                 payload=json.loads(row["payload_json"]),
                 received_at=_load_time(row["received_at"]),
+            )
+            for row in rows
+        ]
+
+    def pending_personal_memory_scans(
+        self, *, idle_before: datetime, limit: int = 25
+    ) -> list[PendingPersonalMemoryScan]:
+        """Return idle conversations with user turns not yet reviewed for memory."""
+        with self._connect() as connection:
+            conversations = connection.execute(
+                "SELECT id, updated_at FROM conversations "
+                "WHERE updated_at <= ? AND (memory_scanned_at IS NULL OR memory_scanned_at < updated_at) "
+                "ORDER BY updated_at ASC LIMIT ?",
+                (_dump_time(idle_before), limit),
+            ).fetchall()
+            scans: list[PendingPersonalMemoryScan] = []
+            for conversation in conversations:
+                messages = connection.execute(
+                    "SELECT id, role, content, brain, model, created_at FROM messages "
+                    "WHERE conversation_id = ? AND role = 'user' ORDER BY created_at, rowid",
+                    (conversation["id"],),
+                ).fetchall()
+                scans.append(
+                    PendingPersonalMemoryScan(
+                        conversation_id=conversation["id"],
+                        updated_at=_load_time(conversation["updated_at"]),
+                        user_messages=[self._message_from_row(connection, message) for message in messages],
+                    )
+                )
+        return scans
+
+    def complete_personal_memory_scan(
+        self,
+        *,
+        conversation_id: str,
+        expected_updated_at: datetime,
+        memories: list[tuple[str, str]],
+    ) -> bool:
+        """Persist reviewed facts if the conversation stayed idle while it was scanned.
+
+        The optimistic updated_at check means a new user message always wins over
+        a background result produced from an older snapshot.
+        """
+        now = _now()
+        with self._connect() as connection:
+            current = connection.execute(
+                "SELECT updated_at FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+            if current is None or current["updated_at"] != _dump_time(expected_updated_at):
+                return False
+            for fact, category in memories:
+                normalized = " ".join(fact.casefold().split())
+                if not normalized:
+                    continue
+                fingerprint = sha256(normalized.encode()).hexdigest()
+                existing = connection.execute(
+                    "SELECT id FROM personal_memories WHERE fingerprint = ?", (fingerprint,)
+                ).fetchone()
+                if existing is None:
+                    connection.execute(
+                        "INSERT INTO personal_memories "
+                        "(id, fact, category, fingerprint, source_conversation_id, created_at, last_confirmed_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            str(uuid4()),
+                            fact,
+                            category,
+                            fingerprint,
+                            conversation_id,
+                            _dump_time(now),
+                            _dump_time(now),
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE personal_memories SET last_confirmed_at = ? WHERE id = ?",
+                        (_dump_time(now), existing["id"]),
+                    )
+            connection.execute(
+                "UPDATE conversations SET memory_scanned_at = ? WHERE id = ?",
+                (_dump_time(now), conversation_id),
+            )
+        return True
+
+    def list_personal_memories(self, *, limit: int = 100) -> list[PersonalMemory]:
+        """Read the user-visible personal-memory record from local SQLite."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, fact, category, source_conversation_id, created_at, last_confirmed_at "
+                "FROM personal_memories ORDER BY last_confirmed_at DESC, created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [
+            PersonalMemory(
+                id=row["id"],
+                fact=row["fact"],
+                category=row["category"],
+                source_conversation_id=row["source_conversation_id"],
+                created_at=_load_time(row["created_at"]),
+                last_confirmed_at=_load_time(row["last_confirmed_at"]),
             )
             for row in rows
         ]

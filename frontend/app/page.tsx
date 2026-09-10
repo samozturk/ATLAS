@@ -95,6 +95,15 @@ type HomeEvent = {
   };
 };
 
+type PersonalMemory = {
+  id: string;
+  fact: string;
+  category: string;
+  source_conversation_id: string;
+  created_at: string;
+  last_confirmed_at: string;
+};
+
 type ToolCallPayload = {
   id?: string;
   function?: {
@@ -246,6 +255,9 @@ export default function HomePage() {
   const [homeEvents, setHomeEvents] = useState<HomeEvent[]>([]);
   const [isLoadingEvents, setIsLoadingEvents] = useState(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
+  const [personalMemories, setPersonalMemories] = useState<PersonalMemory[]>([]);
+  const [isLoadingMemories, setIsLoadingMemories] = useState(false);
+  const [memoriesError, setMemoriesError] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [connection, setConnection] = useState<'ready' | 'working' | 'offline'>('ready');
   const transcriptEnd = useRef<HTMLDivElement>(null);
@@ -291,6 +303,20 @@ export default function HomePage() {
       setEventsError(error instanceof Error ? error.message : 'ATLAS could not load home events.');
     } finally {
       setIsLoadingEvents(false);
+    }
+  };
+
+  const refreshMemories = async () => {
+    setIsLoadingMemories(true);
+    try {
+      const response = await fetch('/memories?limit=100');
+      if (!response.ok) throw new Error('ATLAS could not load your personal memory.');
+      setPersonalMemories(await response.json() as PersonalMemory[]);
+      setMemoriesError(null);
+    } catch (error) {
+      setMemoriesError(error instanceof Error ? error.message : 'ATLAS could not load your personal memory.');
+    } finally {
+      setIsLoadingMemories(false);
     }
   };
 
@@ -423,6 +449,7 @@ export default function HomePage() {
 
   const selectWorkspaceView = (view: WorkspaceView) => {
     setWorkspaceView(view);
+    if (view === 'memory') void refreshMemories();
     if (view === 'home' || view === 'events') void refreshEvents();
   };
 
@@ -515,7 +542,13 @@ export default function HomePage() {
               events={homeEvents}
               isLoadingEvents={isLoadingEvents}
               eventsError={eventsError}
-              onRefresh={() => void refreshEvents()}
+              personalMemories={personalMemories}
+              isLoadingMemories={isLoadingMemories}
+              memoriesError={memoriesError}
+              onRefresh={() => {
+                if (workspaceView === 'memory') void refreshMemories();
+                else void refreshEvents();
+              }}
             />}
           </section>
 
@@ -552,6 +585,9 @@ function WorkspacePanel({
   events,
   isLoadingEvents,
   eventsError,
+  personalMemories,
+  isLoadingMemories,
+  memoriesError,
   onRefresh,
 }: {
   view: Exclude<WorkspaceView, 'chat'>;
@@ -560,6 +596,9 @@ function WorkspacePanel({
   events: HomeEvent[];
   isLoadingEvents: boolean;
   eventsError: string | null;
+  personalMemories: PersonalMemory[];
+  isLoadingMemories: boolean;
+  memoriesError: string | null;
   onRefresh: () => void;
 }) {
   const title = view === 'memory' ? 'Memory' : view === 'home' ? 'Home state' : 'Event feed';
@@ -572,11 +611,17 @@ function WorkspacePanel({
   return <>
     <div className="chat-header">
       <div><p className="eyebrow">{eyebrow}</p><h2 className="mt-1 text-lg font-medium tracking-tight text-white sm:text-xl">{title}</h2></div>
-      {view !== 'memory' ? <Button variant="ghost" size="sm" className="gap-1.5 text-slate-400 hover:bg-white/5 hover:text-white" onClick={onRefresh} disabled={isLoadingEvents}><RefreshCw className={`size-3.5 ${isLoadingEvents ? 'animate-spin' : ''}`} />Refresh</Button> : null}
+      <Button variant="ghost" size="sm" className="gap-1.5 text-slate-400 hover:bg-white/5 hover:text-white" onClick={onRefresh} disabled={view === 'memory' ? isLoadingMemories : isLoadingEvents}><RefreshCw className={`size-3.5 ${(view === 'memory' ? isLoadingMemories : isLoadingEvents) ? 'animate-spin' : ''}`} />Refresh</Button>
     </div>
     <div className="message-scrollbar flex-1 overflow-y-auto px-4 py-8 sm:px-9">
       <div className="mx-auto w-full max-w-3xl">
-        {view === 'memory' ? <MemoryView conversations={conversations} messages={messages} /> : <EventsView
+        {view === 'memory' ? <MemoryView
+          conversations={conversations}
+          messages={messages}
+          memories={personalMemories}
+          isLoading={isLoadingMemories}
+          error={memoriesError}
+        /> : <EventsView
           events={view === 'home' ? latestEvents : events}
           isLoading={isLoadingEvents}
           error={eventsError}
@@ -587,7 +632,19 @@ function WorkspacePanel({
   </>;
 }
 
-function MemoryView({ conversations, messages }: { conversations: ConversationSummary[]; messages: Message[] }) {
+function MemoryView({
+  conversations,
+  messages,
+  memories,
+  isLoading,
+  error,
+}: {
+  conversations: ConversationSummary[];
+  messages: Message[];
+  memories: PersonalMemory[];
+  isLoading: boolean;
+  error: string | null;
+}) {
   const userMessages = messages.filter((message) => message.role === 'user').length;
   const assistantMessages = messages.filter((message) => message.role === 'assistant').length;
   return <div className="workspace-stack">
@@ -598,11 +655,27 @@ function MemoryView({ conversations, messages }: { conversations: ConversationSu
       <Metric icon={<BrainCircuit />} label="Assistant replies" value={String(assistantMessages)} />
     </div>
     <section className="workspace-card">
+      <p className="eyebrow">What ATLAS remembers about you</p>
+      {error ? <p className="workspace-muted mt-3 text-rose-300">{error}</p> : null}
+      {isLoading ? <p className="workspace-muted mt-3">Reviewing the local profile…</p> : null}
+      {!isLoading && !error && !memories.length ? <p className="workspace-muted mt-3">Nothing saved yet. Five minutes after a conversation becomes idle, ATLAS reviews explicit, durable facts you shared and adds any safe ones here.</p> : null}
+      {!isLoading && !error && memories.length ? <div className="personal-memory-list mt-3">
+        {memories.map((memory) => <article className="personal-memory-card" key={memory.id}>
+          <div className="flex items-start justify-between gap-3"><p>{memory.fact}</p><span>{memory.category}</span></div>
+          <time>Last confirmed {formatMemoryTime(memory.last_confirmed_at)}</time>
+        </article>)}
+      </div> : null}
+    </section>
+    <section className="workspace-card">
       <p className="eyebrow">What ATLAS keeps</p>
       <ul className="workspace-list"><li>Conversation messages and timestamps</li><li>Selected brain and model for each response</li><li>Tool activity and results for the conversation</li></ul>
-      <p className="workspace-muted">Long-term preferences and semantic recall will be added separately; ATLAS does not infer them from chat history yet.</p>
+      <p className="workspace-muted">Personal memory is local and inspectable here. ATLAS only adds explicit, durable facts you share; it skips guesses and sensitive details.</p>
     </section>
   </div>;
+}
+
+function formatMemoryTime(value: string): string {
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(new Date(value));
 }
 
 function EventsView({ events, isLoading, error, mode }: { events: HomeEvent[]; isLoading: boolean; error: string | null; mode: 'home' | 'events' }) {

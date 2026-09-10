@@ -16,6 +16,7 @@ from atlas.conversations import (
     ConversationNotFoundError,
     ConversationStore,
     ConversationSummary,
+    PersonalMemory,
     StoredConversation,
     StoredEvent,
     StoredToolActivity,
@@ -27,6 +28,7 @@ from atlas.llm.provider import LLMError, LLMProvider
 from atlas.llm.service import ChatService
 from atlas.logging import configure_logging
 from atlas.mqtt import MQTTEventAdapter
+from atlas.memory import PersonalMemoryWorker
 from atlas.obsidian import ObsidianVault
 from atlas.tools import (
     CurrentTimeTool,
@@ -54,6 +56,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # databases, workers, and event-bus connections before accepting traffic.
     app.state.conversation_store.initialize()
     app.state.mqtt_task = None
+    app.state.memory_task = asyncio.create_task(
+        app.state.personal_memory_worker.run(), name="atlas-personal-memory"
+    )
     if settings.mqtt_enabled:
         app.state.mqtt_task = asyncio.create_task(app.state.mqtt_adapter.run(), name="atlas-mqtt")
     app.state.ready = True
@@ -62,6 +67,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         app.state.ready = False
+        memory_task: asyncio.Task[None] = app.state.memory_task
+        memory_task.cancel()
+        await asyncio.gather(memory_task, return_exceptions=True)
         mqtt_task: asyncio.Task[None] | None = app.state.mqtt_task
         if mqtt_task is not None:
             mqtt_task.cancel()
@@ -87,6 +95,9 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
     app.state.conversation_store = ConversationStore(settings.database_path)
     app.state.mqtt_adapter = MQTTEventAdapter(settings, app.state.conversation_store.record_event)
     app.state.llm_provider = provider or OllamaProvider(settings)
+    app.state.personal_memory_worker = PersonalMemoryWorker(
+        settings, app.state.llm_provider, app.state.conversation_store
+    )
     registered_tools = [CurrentTimeTool()]
     app.state.weather_client = OpenMeteoWeatherClient(settings)
     registered_tools.append(CurrentWeatherTool(app.state.weather_client))
@@ -139,6 +150,10 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
             if message.content
         ], request.conversation_id
 
+    def personal_memory_facts() -> list[str]:
+        """Keep the small, reviewed profile useful to ATLAS without exposing raw history."""
+        return [memory.fact for memory in app.state.conversation_store.list_personal_memories(limit=40)]
+
     @app.exception_handler(LLMError)
     async def llm_error_handler(_: Request, error: LLMError) -> JSONResponse:
         log.warning("chat.failed", error_type=type(error).__name__)
@@ -158,6 +173,10 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
     async def list_events(limit: int = Query(default=50, ge=1, le=200)) -> list[StoredEvent]:
         return app.state.conversation_store.list_events(limit=limit)
 
+    @app.get("/memories", response_model=list[PersonalMemory], tags=["memory"])
+    async def list_personal_memories(limit: int = Query(default=100, ge=1, le=200)) -> list[PersonalMemory]:
+        return app.state.conversation_store.list_personal_memories(limit=limit)
+
     @app.post("/conversations", response_model=ConversationSummary, status_code=status.HTTP_201_CREATED, tags=["conversations"])
     async def create_conversation() -> ConversationSummary:
         return app.state.conversation_store.create_conversation()
@@ -176,7 +195,9 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
     @app.post("/chat", response_model=ChatResponse, tags=["chat"])
     async def chat(request: ChatRequest) -> ChatResponse:
         messages, conversation_id = conversation_messages(request)
-        completion = await app.state.chat_service.reply(messages, request.brain)
+        completion = await app.state.chat_service.reply(
+            messages, request.brain, personal_memory=personal_memory_facts()
+        )
         if conversation_id is not None:
             app.state.conversation_store.append_message(
                 conversation_id,
@@ -201,7 +222,9 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
             tool_activity: list[StoredToolActivity] = []
             model = app.state.chat_service.model_for(request.brain)
             try:
-                async for event in app.state.chat_service.stream(messages, request.brain):
+                async for event in app.state.chat_service.stream(
+                    messages, request.brain, personal_memory=personal_memory_facts()
+                ):
                     if event.type == "token":
                         content.append(event.content)
                     elif event.type == "tool_call":
