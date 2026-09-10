@@ -155,6 +155,11 @@ const initialMessages: Message[] = [
   },
 ];
 
+// Ollama does not expose a tokenizer-count endpoint for an in-progress draft,
+// so keep the context signal useful and honest: it is a conservative estimate.
+const contextWindowTokens = 262_144;
+const systemPromptTokenReserve = 1_000;
+
 function streamFrames(chunk: string): Array<{ event: string; data: StreamPayload }> {
   return chunk
     .split('\n\n')
@@ -199,6 +204,20 @@ function createMessageId(): string {
   }
 
   return `message-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function estimateContextTokens(messages: Message[], draft: string): number {
+  const messageTokens = messages.reduce(
+    (total, message) => total + Math.ceil(message.content.length / 4) + 4,
+    0,
+  );
+  return systemPromptTokenReserve + messageTokens + Math.ceil(draft.length / 4);
+}
+
+function compactTokenCount(value: number): string {
+  if (value >= 10_000) return `${Math.floor(value / 1_000)}K`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+  return String(value);
 }
 
 function toolActivityFromCalls(toolCalls: ToolCallPayload[]): ToolActivity[] {
@@ -564,7 +583,7 @@ export default function HomePage() {
                 </button>;
               })}
             </div>
-            <div className="mt-4 grid grid-cols-2 gap-2 border-t border-white/[0.06] pt-4 xl:grid-cols-1"><Metric icon={<Gauge />} label="Context" value="256K" /><Metric icon={<Cpu />} label="Execution" value="Local" /></div>
+            <div className="mt-4 grid grid-cols-2 gap-2 border-t border-white/[0.06] pt-4 xl:grid-cols-1"><ContextBudget messages={messages} draft={draft} /><Metric icon={<Cpu />} label="Execution" value="Local" /></div>
             <div className="mt-4 rounded-2xl border border-cyan-300/10 bg-cyan-300/[0.035] p-3.5"><div className="flex items-center gap-2 text-xs font-medium text-cyan-100"><Waves className="size-3.5 text-cyan-300" />Thoughtful by design</div><p className="mt-2 text-xs leading-5 text-slate-400">ATLAS records the selected brain with every response. Automatic escalation can be added later.</p></div>
           </aside>
         </div>
@@ -710,6 +729,18 @@ function eventSummary(event: HomeEvent): string {
 
 function Metric({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
   return <div className="metric-card"><span>{icon}</span><div><p>{label}</p><strong>{value}</strong></div></div>;
+}
+
+function ContextBudget({ messages, draft }: { messages: Message[]; draft: string }) {
+  const used = estimateContextTokens(messages, draft);
+  const remaining = Math.max(0, contextWindowTokens - used);
+  const percentUsed = Math.min(100, (used / contextWindowTokens) * 100);
+  const status = percentUsed >= 90 ? 'critical' : percentUsed >= 75 ? 'warning' : 'healthy';
+  return <div className="context-budget" title="Estimated from the visible conversation, current draft, and ATLAS system instructions.">
+    <div className="flex items-center gap-2"><Gauge className="size-3.5 text-cyan-300" /><p>Context left</p><strong>{compactTokenCount(remaining)}</strong></div>
+    <div className="context-budget-track" aria-hidden="true"><span className={`context-budget-fill context-budget-${status}`} style={{ width: `${percentUsed}%` }} /></div>
+    <span>≈ tokens · 256K limit</span>
+  </div>;
 }
 
 function MessageBubble({ message }: { message: Message }) {
