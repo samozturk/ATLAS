@@ -26,6 +26,7 @@ import {
   PanelLeft,
   Plus,
   Radio,
+  RefreshCw,
   Settings2,
   Sparkles,
   Waves,
@@ -39,6 +40,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 
 type Brain = 'fast' | 'deep';
+type WorkspaceView = 'chat' | 'memory' | 'home' | 'events';
 
 type Message = {
   id: string;
@@ -82,6 +84,17 @@ type StoredMessage = {
 
 type StoredConversation = ConversationSummary & { messages: StoredMessage[] };
 
+type HomeEvent = {
+  id: string;
+  type: string;
+  source: string;
+  occurred_at: string;
+  payload: {
+    topic?: string;
+    data?: unknown;
+  };
+};
+
 type ToolCallPayload = {
   id?: string;
   function?: {
@@ -98,7 +111,7 @@ type ToolResultPayload = {
 };
 
 type StreamPayload = {
-  type: 'thinking' | 'token' | 'tool_call' | 'done';
+  type: 'thinking' | 'token' | 'tool_call' | 'tool_result' | 'done';
   content?: string;
   brain?: Brain;
   model?: string;
@@ -229,6 +242,10 @@ export default function HomePage() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('chat');
+  const [homeEvents, setHomeEvents] = useState<HomeEvent[]>([]);
+  const [isLoadingEvents, setIsLoadingEvents] = useState(false);
+  const [eventsError, setEventsError] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [connection, setConnection] = useState<'ready' | 'working' | 'offline'>('ready');
   const transcriptEnd = useRef<HTMLDivElement>(null);
@@ -261,6 +278,20 @@ export default function HomePage() {
     setMessages(initialMessages);
     setConversations((current) => [conversation, ...current]);
     return conversation;
+  };
+
+  const refreshEvents = async () => {
+    setIsLoadingEvents(true);
+    try {
+      const response = await fetch('/events?limit=50');
+      if (!response.ok) throw new Error('ATLAS could not load home events.');
+      setHomeEvents(await response.json() as HomeEvent[]);
+      setEventsError(null);
+    } catch (error) {
+      setEventsError(error instanceof Error ? error.message : 'ATLAS could not load home events.');
+    } finally {
+      setIsLoadingEvents(false);
+    }
   };
 
   useEffect(() => {
@@ -390,6 +421,11 @@ export default function HomePage() {
     }
   };
 
+  const selectWorkspaceView = (view: WorkspaceView) => {
+    setWorkspaceView(view);
+    if (view === 'home' || view === 'events') void refreshEvents();
+  };
+
   const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
@@ -432,10 +468,10 @@ export default function HomePage() {
             <div>
               <div className="mb-6 flex items-center justify-between px-2 pt-1"><p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">Workspace</p><MoreHorizontal className="size-4 text-slate-600" /></div>
               <nav className="space-y-1" aria-label="ATLAS sections">
-                <SidebarItem active icon={<MessageSquare />} label="Active conversation" />
-                <SidebarItem icon={<History />} label="Memory" hint="Soon" />
-                <SidebarItem icon={<Home />} label="Home state" hint="Soon" />
-                <SidebarItem icon={<Activity />} label="Event feed" hint="Soon" />
+                <SidebarItem active={workspaceView === 'chat'} icon={<MessageSquare />} label="Active conversation" onClick={() => selectWorkspaceView('chat')} />
+                <SidebarItem active={workspaceView === 'memory'} icon={<History />} label="Memory" onClick={() => selectWorkspaceView('memory')} />
+                <SidebarItem active={workspaceView === 'home'} icon={<Home />} label="Home state" onClick={() => selectWorkspaceView('home')} />
+                <SidebarItem active={workspaceView === 'events'} icon={<Activity />} label="Event feed" onClick={() => selectWorkspaceView('events')} />
               </nav>
               <div className="mt-6 border-t border-white/[0.06] pt-4">
                 <p className="px-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">Recent conversations</p>
@@ -452,25 +488,35 @@ export default function HomePage() {
           </aside>
 
           <section className="chat-panel glass-panel relative flex min-h-[680px] flex-col overflow-hidden">
-            <div className="chat-header">
-              <div><p className="eyebrow">Private conversation</p><h2 className="mt-1 text-lg font-medium tracking-tight text-white sm:text-xl">What would you like to explore?</h2></div>
-              <Button variant="ghost" size="sm" className="gap-1.5 text-slate-400 hover:bg-white/5 hover:text-white" onClick={() => void startNewConversation()} disabled={isStreaming || isLoadingHistory}><Plus className="size-3.5" />New thread</Button>
-            </div>
-            <div className="message-scrollbar flex-1 overflow-y-auto px-4 py-8 sm:px-9">
-              <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
-                <div className="system-line"><span /><p>Local history · Stored on this machine</p><span /></div>
-                {messages.map((message) => <MessageBubble key={message.id} message={message} />)}
-                <div ref={transcriptEnd} />
+            {workspaceView === 'chat' ? <>
+              <div className="chat-header">
+                <div><p className="eyebrow">Private conversation</p><h2 className="mt-1 text-lg font-medium tracking-tight text-white sm:text-xl">What would you like to explore?</h2></div>
+                <Button variant="ghost" size="sm" className="gap-1.5 text-slate-400 hover:bg-white/5 hover:text-white" onClick={() => void startNewConversation()} disabled={isStreaming || isLoadingHistory}><Plus className="size-3.5" />New thread</Button>
               </div>
-            </div>
-            <form onSubmit={sendMessage} className="composer-wrap">
-              <div className="composer-glow" />
-              <div className="composer relative">
-                <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="Message ATLAS…" aria-label="Message ATLAS" className="min-h-[96px] resize-none border-0 bg-transparent px-4 py-4 pr-14 text-sm leading-6 text-white placeholder:text-slate-600 focus-visible:ring-0" disabled={isStreaming || isLoadingHistory || !conversationId} />
-                <Button type="submit" size="icon-lg" className="send-button absolute bottom-3 right-3 rounded-xl" disabled={!draft.trim() || isStreaming || isLoadingHistory || !conversationId} aria-label="Send message"><ArrowUp className="size-4" /></Button>
-                <div className="flex items-center gap-2 px-4 pb-3 text-[10px] font-medium text-slate-600"><Command className="size-3" />Enter to send <span className="mx-0.5 text-slate-800">·</span> Shift + Enter for a new line</div>
+              <div className="message-scrollbar flex-1 overflow-y-auto px-4 py-8 sm:px-9">
+                <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
+                  <div className="system-line"><span /><p>Local history · Stored on this machine</p><span /></div>
+                  {messages.map((message) => <MessageBubble key={message.id} message={message} />)}
+                  <div ref={transcriptEnd} />
+                </div>
               </div>
-            </form>
+              <form onSubmit={sendMessage} className="composer-wrap">
+                <div className="composer-glow" />
+                <div className="composer relative">
+                  <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="Message ATLAS…" aria-label="Message ATLAS" className="min-h-[96px] resize-none border-0 bg-transparent px-4 py-4 pr-14 text-sm leading-6 text-white placeholder:text-slate-600 focus-visible:ring-0" disabled={isStreaming || isLoadingHistory || !conversationId} />
+                  <Button type="submit" size="icon-lg" className="send-button absolute bottom-3 right-3 rounded-xl" disabled={!draft.trim() || isStreaming || isLoadingHistory || !conversationId} aria-label="Send message"><ArrowUp className="size-4" /></Button>
+                  <div className="flex items-center gap-2 px-4 pb-3 text-[10px] font-medium text-slate-600"><Command className="size-3" />Enter to send <span className="mx-0.5 text-slate-800">·</span> Shift + Enter for a new line</div>
+                </div>
+              </form>
+            </> : <WorkspacePanel
+              view={workspaceView}
+              conversations={conversations}
+              messages={messages}
+              events={homeEvents}
+              isLoadingEvents={isLoadingEvents}
+              eventsError={eventsError}
+              onRefresh={() => void refreshEvents()}
+            />}
           </section>
 
           <aside className="brain-panel glass-panel order-first p-3 xl:order-none">
@@ -495,8 +541,98 @@ export default function HomePage() {
   );
 }
 
-function SidebarItem({ active = false, icon, label, hint }: { active?: boolean; icon: ReactNode; label: string; hint?: string }) {
-  return <button type="button" className={`sidebar-item ${active ? 'sidebar-item-active' : ''}`}>{icon}<span className="flex-1 text-left">{label}</span>{hint && <span className="text-[9px] uppercase tracking-[0.1em] text-slate-600">{hint}</span>}</button>;
+function SidebarItem({ active = false, icon, label, hint, onClick }: { active?: boolean; icon: ReactNode; label: string; hint?: string; onClick?: () => void }) {
+  return <button type="button" onClick={onClick} className={`sidebar-item ${active ? 'sidebar-item-active' : ''}`}>{icon}<span className="flex-1 text-left">{label}</span>{hint && <span className="text-[9px] uppercase tracking-[0.1em] text-slate-600">{hint}</span>}</button>;
+}
+
+function WorkspacePanel({
+  view,
+  conversations,
+  messages,
+  events,
+  isLoadingEvents,
+  eventsError,
+  onRefresh,
+}: {
+  view: Exclude<WorkspaceView, 'chat'>;
+  conversations: ConversationSummary[];
+  messages: Message[];
+  events: HomeEvent[];
+  isLoadingEvents: boolean;
+  eventsError: string | null;
+  onRefresh: () => void;
+}) {
+  const title = view === 'memory' ? 'Memory' : view === 'home' ? 'Home state' : 'Event feed';
+  const eyebrow = view === 'memory' ? 'Local continuity' : view === 'home' ? 'Connected home' : 'Incoming signals';
+  const latestEvents = Object.values(events.reduce<Record<string, HomeEvent>>((latest, event) => {
+    latest[event.type] ??= event;
+    return latest;
+  }, {}));
+
+  return <>
+    <div className="chat-header">
+      <div><p className="eyebrow">{eyebrow}</p><h2 className="mt-1 text-lg font-medium tracking-tight text-white sm:text-xl">{title}</h2></div>
+      {view !== 'memory' ? <Button variant="ghost" size="sm" className="gap-1.5 text-slate-400 hover:bg-white/5 hover:text-white" onClick={onRefresh} disabled={isLoadingEvents}><RefreshCw className={`size-3.5 ${isLoadingEvents ? 'animate-spin' : ''}`} />Refresh</Button> : null}
+    </div>
+    <div className="message-scrollbar flex-1 overflow-y-auto px-4 py-8 sm:px-9">
+      <div className="mx-auto w-full max-w-3xl">
+        {view === 'memory' ? <MemoryView conversations={conversations} messages={messages} /> : <EventsView
+          events={view === 'home' ? latestEvents : events}
+          isLoading={isLoadingEvents}
+          error={eventsError}
+          mode={view}
+        />}
+      </div>
+    </div>
+  </>;
+}
+
+function MemoryView({ conversations, messages }: { conversations: ConversationSummary[]; messages: Message[] }) {
+  const userMessages = messages.filter((message) => message.role === 'user').length;
+  const assistantMessages = messages.filter((message) => message.role === 'assistant').length;
+  return <div className="workspace-stack">
+    <p className="workspace-intro">Your conversations stay on this machine and are restored when you return.</p>
+    <div className="workspace-metrics">
+      <Metric icon={<History />} label="Saved threads" value={String(conversations.length)} />
+      <Metric icon={<MessageSquare />} label="This thread" value={`${userMessages + assistantMessages} messages`} />
+      <Metric icon={<BrainCircuit />} label="Assistant replies" value={String(assistantMessages)} />
+    </div>
+    <section className="workspace-card">
+      <p className="eyebrow">What ATLAS keeps</p>
+      <ul className="workspace-list"><li>Conversation messages and timestamps</li><li>Selected brain and model for each response</li><li>Tool activity and results for the conversation</li></ul>
+      <p className="workspace-muted">Long-term preferences and semantic recall will be added separately; ATLAS does not infer them from chat history yet.</p>
+    </section>
+  </div>;
+}
+
+function EventsView({ events, isLoading, error, mode }: { events: HomeEvent[]; isLoading: boolean; error: string | null; mode: 'home' | 'events' }) {
+  if (error) return <div className="workspace-empty"><Activity className="size-5" /><p>{error}</p></div>;
+  if (!events.length && !isLoading) return <div className="workspace-empty"><Radio className="size-5" /><p>{mode === 'home' ? 'No device state yet. Enable MQTT and let a device publish its first event.' : 'No home events have arrived yet.'}</p></div>;
+  return <div className="workspace-stack">
+    <p className="workspace-intro">{mode === 'home' ? 'Latest known state from each reported event type.' : 'Newest events received from your local MQTT event namespace.'}</p>
+    <div className="event-list">
+      {events.map((event) => <article className="event-card" key={event.id}>
+        <div className="event-card-icon"><Activity className="size-4" /></div>
+        <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1"><strong>{formatEventType(event.type)}</strong><time>{formatEventTime(event.occurred_at)}</time></div><p>{eventSummary(event)}</p><span>{event.payload.topic ?? event.source}</span></div>
+      </article>)}
+    </div>
+  </div>;
+}
+
+function formatEventType(type: string): string {
+  return type.replaceAll(/[._-]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatEventTime(value: string): string {
+  return new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(value));
+}
+
+function eventSummary(event: HomeEvent): string {
+  const data = event.payload.data;
+  if (typeof data === 'string') return data;
+  if (typeof data === 'number' || typeof data === 'boolean') return String(data);
+  if (data && typeof data === 'object') return Object.entries(data).slice(0, 4).map(([key, value]) => `${key}: ${String(value)}`).join(' · ');
+  return 'No event data supplied.';
 }
 
 function Metric({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
