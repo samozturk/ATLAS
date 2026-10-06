@@ -17,10 +17,13 @@ from atlas.conversations import (
     ConversationStore,
     ConversationSummary,
     PersonalMemory,
+    SemanticConversationTurn,
     StoredConversation,
     StoredEvent,
+    StoredMessage,
     StoredToolActivity,
 )
+from atlas.embeddings import EmbeddingError, OllamaEmbeddingClient
 from atlas.events import AtlasEvent
 from atlas.llm.models import ChatRequest, ChatResponse, ConversationMessage, ToolCall
 from atlas.llm.ollama import OllamaProvider
@@ -30,6 +33,7 @@ from atlas.logging import configure_logging
 from atlas.mqtt import MQTTEventAdapter
 from atlas.memory import PersonalMemoryWorker
 from atlas.obsidian import ObsidianVault
+from atlas.semantic_recall import SemanticRecallService
 from atlas.tools import (
     CurrentTimeTool,
     CurrentWeatherTool,
@@ -59,6 +63,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.memory_task = asyncio.create_task(
         app.state.personal_memory_worker.run(), name="atlas-personal-memory"
     )
+    app.state.semantic_backfill_task = asyncio.create_task(
+        app.state.semantic_recall.backfill(), name="atlas-semantic-backfill"
+    )
     if settings.mqtt_enabled:
         app.state.mqtt_task = asyncio.create_task(app.state.mqtt_adapter.run(), name="atlas-mqtt")
     app.state.ready = True
@@ -70,6 +77,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         memory_task: asyncio.Task[None] = app.state.memory_task
         memory_task.cancel()
         await asyncio.gather(memory_task, return_exceptions=True)
+        semantic_backfill_task: asyncio.Task[int] = app.state.semantic_backfill_task
+        semantic_backfill_task.cancel()
+        await asyncio.gather(semantic_backfill_task, return_exceptions=True)
+        semantic_index_tasks = list(app.state.semantic_index_tasks)
+        for task in semantic_index_tasks:
+            task.cancel()
+        await asyncio.gather(*semantic_index_tasks, return_exceptions=True)
         mqtt_task: asyncio.Task[None] | None = app.state.mqtt_task
         if mqtt_task is not None:
             mqtt_task.cancel()
@@ -78,12 +92,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         weather_client: OpenMeteoWeatherClient | None = app.state.weather_client
         if weather_client is not None:
             await weather_client.aclose()
+        await app.state.semantic_recall.aclose()
         # A dedicated shutdown boundary makes later worker cleanup deterministic.
         await asyncio.sleep(0)
         log.info("atlas.stopped", system_event=AtlasEvent(type="system.stopped").model_dump(mode="json"))
 
 
-def create_app(settings: Settings | None = None, provider: LLMProvider | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    provider: LLMProvider | None = None,
+    embedding_client: OllamaEmbeddingClient | None = None,
+) -> FastAPI:
     """Build ATLAS without starting the server, enabling reliable tests."""
     settings = settings or get_settings()
     configure_logging(settings.log_level)
@@ -95,6 +114,12 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
     app.state.conversation_store = ConversationStore(settings.database_path)
     app.state.mqtt_adapter = MQTTEventAdapter(settings, app.state.conversation_store.record_event)
     app.state.llm_provider = provider or OllamaProvider(settings)
+    app.state.semantic_recall = SemanticRecallService(
+        settings,
+        app.state.conversation_store,
+        embedding_client or OllamaEmbeddingClient(settings),
+    )
+    app.state.semantic_index_tasks: set[asyncio.Task[None]] = set()
     app.state.personal_memory_worker = PersonalMemoryWorker(
         settings, app.state.llm_provider, app.state.conversation_store
     )
@@ -121,10 +146,12 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
         ),
     )
 
-    def conversation_messages(request: ChatRequest) -> tuple[list[ConversationMessage], str | None]:
+    def conversation_messages(
+        request: ChatRequest,
+    ) -> tuple[list[ConversationMessage], str | None, StoredMessage | None]:
         """Use persisted history only when the client explicitly names a thread."""
         if request.conversation_id is None:
-            return list(request.messages), None
+            return list(request.messages), None, None
         if len(request.messages) != 1:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -135,7 +162,7 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
         except ConversationNotFoundError as error:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.") from error
         user_message = request.messages[0]
-        app.state.conversation_store.append_message(
+        stored_user_message = app.state.conversation_store.append_message(
             request.conversation_id,
             role="user",
             content=user_message.content,
@@ -148,11 +175,41 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
             message.as_conversation_message()
             for message in conversation.messages
             if message.content
-        ], request.conversation_id
+        ], request.conversation_id, stored_user_message
 
     def personal_memory_facts() -> list[str]:
         """Keep the small, reviewed profile useful to ATLAS without exposing raw history."""
         return [memory.fact for memory in app.state.conversation_store.list_personal_memories(limit=40)]
+
+    async def recalled_context(query: str, conversation_id: str | None) -> list[str]:
+        """Retrieve small prior-chat excerpts without making semantic search a chat dependency."""
+        try:
+            recalls = await app.state.semantic_recall.recall(
+                query, exclude_conversation_id=conversation_id
+            )
+        except EmbeddingError as error:
+            log.warning("semantic_recall.unavailable", detail=str(error))
+            return []
+        budget = settings.semantic_retrieval_max_context_chars
+        excerpts: list[str] = []
+        for recall in recalls:
+            if budget <= 0:
+                break
+            excerpt = recall.content[:budget]
+            excerpts.append(f"[Earlier conversation]\n{excerpt}")
+            budget -= len(excerpt)
+        return excerpts
+
+    async def index_semantic_turn(turn: SemanticConversationTurn) -> None:
+        try:
+            await app.state.semantic_recall.index_turn(turn)
+        except EmbeddingError as error:
+            log.warning("semantic_recall.indexing_failed", detail=str(error))
+
+    def schedule_semantic_index(turn: SemanticConversationTurn) -> None:
+        task = asyncio.create_task(index_semantic_turn(turn), name="atlas-semantic-index")
+        app.state.semantic_index_tasks.add(task)
+        task.add_done_callback(app.state.semantic_index_tasks.discard)
 
     @app.exception_handler(LLMError)
     async def llm_error_handler(_: Request, error: LLMError) -> JSONResponse:
@@ -194,17 +251,27 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
 
     @app.post("/chat", response_model=ChatResponse, tags=["chat"])
     async def chat(request: ChatRequest) -> ChatResponse:
-        messages, conversation_id = conversation_messages(request)
+        messages, conversation_id, stored_user_message = conversation_messages(request)
         completion = await app.state.chat_service.reply(
-            messages, request.brain, personal_memory=personal_memory_facts()
+            messages,
+            request.brain,
+            personal_memory=personal_memory_facts(),
+            retrieved_context=await recalled_context(request.messages[-1].content, conversation_id),
         )
-        if conversation_id is not None:
-            app.state.conversation_store.append_message(
+        if conversation_id is not None and stored_user_message is not None:
+            stored_assistant_message = app.state.conversation_store.append_message(
                 conversation_id,
                 role="assistant",
                 content=completion.message.content,
                 brain=request.brain,
                 model=completion.model,
+            )
+            schedule_semantic_index(
+                SemanticConversationTurn(
+                    conversation_id=conversation_id,
+                    user_message=stored_user_message,
+                    assistant_message=stored_assistant_message,
+                )
             )
         return ChatResponse(
             content=completion.message.content,
@@ -215,7 +282,7 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
 
     @app.post("/chat/stream", tags=["chat"])
     async def stream_chat(request: ChatRequest) -> StreamingResponse:
-        messages, conversation_id = conversation_messages(request)
+        messages, conversation_id, stored_user_message = conversation_messages(request)
 
         async def events() -> AsyncIterator[str]:
             content: list[str] = []
@@ -223,7 +290,10 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
             model = app.state.chat_service.model_for(request.brain)
             try:
                 async for event in app.state.chat_service.stream(
-                    messages, request.brain, personal_memory=personal_memory_facts()
+                    messages,
+                    request.brain,
+                    personal_memory=personal_memory_facts(),
+                    retrieved_context=await recalled_context(request.messages[-1].content, conversation_id),
                 ):
                     if event.type == "token":
                         content.append(event.content)
@@ -234,14 +304,21 @@ def create_app(settings: Settings | None = None, provider: LLMProvider | None = 
                     elif event.type == "done" and event.model is not None:
                         model = event.model
                     yield _sse(event.type, event.model_dump(mode="json", exclude_none=True))
-                if conversation_id is not None:
-                    app.state.conversation_store.append_message(
+                if conversation_id is not None and stored_user_message is not None:
+                    stored_assistant_message = app.state.conversation_store.append_message(
                         conversation_id,
                         role="assistant",
                         content="".join(content),
                         brain=request.brain,
                         model=model,
                         tool_activity=tool_activity,
+                    )
+                    schedule_semantic_index(
+                        SemanticConversationTurn(
+                            conversation_id=conversation_id,
+                            user_message=stored_user_message,
+                            assistant_message=stored_assistant_message,
+                        )
                     )
             except LLMError as error:
                 log.warning("chat.stream_failed", error_type=type(error).__name__)

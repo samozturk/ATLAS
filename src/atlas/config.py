@@ -36,6 +36,15 @@ class Settings(BaseSettings):
     agent_max_tool_rounds: int = Field(default=3, ge=1, le=8)
     tool_execution_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
     database_path: str = "data/atlas.db"
+    # Semantic recall is local: Ollama produces embeddings and SQLite persists
+    # them beside the conversation history for bounded nearest-neighbour search.
+    semantic_retrieval_enabled: bool = True
+    embedding_model: str = Field(default="embeddinggemma", min_length=1)
+    embedding_request_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    semantic_retrieval_limit: int = Field(default=4, ge=1, le=12)
+    semantic_retrieval_min_similarity: float = Field(default=0.45, ge=-1, le=1)
+    semantic_retrieval_max_context_chars: int = Field(default=6_000, ge=500, le=20_000)
+    semantic_backfill_batch_size: int = Field(default=12, ge=1, le=100)
     # Review only an idle conversation, and keep the resulting profile local.
     memory_idle_seconds: int = Field(default=300, ge=60, le=86_400)
     memory_scan_interval_seconds: int = Field(default=60, ge=15, le=3_600)

@@ -280,7 +280,12 @@ def test_chat_registers_weather_with_the_waalwijk_default() -> None:
 def test_streaming_chat_persists_and_restores_a_conversation_with_tool_activity(tmp_path) -> None:
     provider = StreamingToolProvider()
     app = create_app(
-        Settings(environment="test", database_path=str(tmp_path / "atlas.db")), provider=provider
+        Settings(
+            environment="test",
+            database_path=str(tmp_path / "atlas.db"),
+            semantic_retrieval_enabled=False,
+        ),
+        provider=provider,
     )
 
     with TestClient(app) as client:

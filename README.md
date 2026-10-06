@@ -215,6 +215,28 @@ or legal information, or precise/live location. Change the idle delay, polling
 interval, or per-conversation cap with `ATLAS_MEMORY_IDLE_SECONDS`,
 `ATLAS_MEMORY_SCAN_INTERVAL_SECONDS`, and `ATLAS_MEMORY_MAX_FACTS_PER_CONVERSATION`.
 
+## Semantic conversation recall
+
+ATLAS also has a local SQLite-backed vector store for relevant past-chat recall.
+It embeds each completed user/assistant exchange with Ollama, then adds only the
+closest excerpts from other conversations to a new chat request. It first
+backfills existing completed conversations after startup, then indexes each new
+turn in the background. The current conversation is excluded because its full
+history is already present in the prompt.
+
+Pull the local embedding model once on the machine running Ollama:
+
+```bash
+ollama pull embeddinggemma
+```
+
+The default `ATLAS_SEMANTIC_RETRIEVAL_ENABLED=true` keeps all vectors in
+`data/atlas.db`; no cloud embedding or external vector service is used. Adjust
+the model, result count, similarity threshold, and prompt budget with the
+`ATLAS_EMBEDDING_MODEL`, `ATLAS_SEMANTIC_RETRIEVAL_LIMIT`,
+`ATLAS_SEMANTIC_RETRIEVAL_MIN_SIMILARITY`, and
+`ATLAS_SEMANTIC_RETRIEVAL_MAX_CONTEXT_CHARS` settings.
+
 For Tailnet access, Compose allows the configured Studio hostname (`cortex`) to
 reach Vite. If you rename that machine or use a different MagicDNS hostname,
 change `ATLAS_UI_ALLOWED_HOSTS` in `docker-compose.yml` (a comma-separated list

@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import struct
 from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,6 +84,25 @@ class PendingPersonalMemoryScan(BaseModel):
     user_messages: list[StoredMessage]
 
 
+class SemanticConversationTurn(BaseModel):
+    """One completed exchange ready to be represented as a local vector."""
+
+    conversation_id: str
+    user_message: StoredMessage
+    assistant_message: StoredMessage
+
+
+class StoredSemanticDocument(BaseModel):
+    """A persisted conversation exchange and its local embedding vector."""
+
+    message_id: str
+    conversation_id: str
+    content: str
+    embedding: list[float]
+    embedding_model: str
+    created_at: datetime
+
+
 class ConversationStore:
     """Own the SQLite schema and keep all persistent state on the ATLAS host."""
 
@@ -145,6 +165,17 @@ class ConversationStore:
                 );
                 CREATE INDEX IF NOT EXISTS personal_memories_last_confirmed_at
                     ON personal_memories(last_confirmed_at DESC);
+                CREATE TABLE IF NOT EXISTS conversation_vectors (
+                    message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    content TEXT NOT NULL,
+                    embedding BLOB NOT NULL,
+                    dimensions INTEGER NOT NULL,
+                    embedding_model TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS conversation_vectors_model_created_at
+                    ON conversation_vectors(embedding_model, created_at DESC);
                 """
             )
             # Existing installations predate memory_scanned_at. SQLite does not
@@ -393,6 +424,110 @@ class ConversationStore:
             )
             for row in rows
         ]
+
+    def store_semantic_turn(
+        self,
+        turn: SemanticConversationTurn,
+        *,
+        content: str,
+        embedding: list[float],
+        embedding_model: str,
+    ) -> None:
+        """Upsert an assistant-completed exchange using the embedding model that made it."""
+        if not embedding:
+            raise ValueError("semantic embeddings cannot be empty")
+        vector = sqlite3.Binary(struct.pack(f"<{len(embedding)}f", *embedding))
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO conversation_vectors "
+                "(message_id, conversation_id, content, embedding, dimensions, embedding_model, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(message_id) DO UPDATE SET content = excluded.content, embedding = excluded.embedding, "
+                "dimensions = excluded.dimensions, embedding_model = excluded.embedding_model, "
+                "created_at = excluded.created_at",
+                (
+                    turn.assistant_message.id,
+                    turn.conversation_id,
+                    content,
+                    vector,
+                    len(embedding),
+                    embedding_model,
+                    _dump_time(turn.assistant_message.created_at),
+                ),
+            )
+
+    def list_semantic_documents(
+        self,
+        *,
+        embedding_model: str,
+        exclude_conversation_id: str | None = None,
+        limit: int = 5_000,
+    ) -> list[StoredSemanticDocument]:
+        """Read a bounded candidate set for in-process cosine similarity ranking."""
+        query = (
+            "SELECT message_id, conversation_id, content, embedding, dimensions, embedding_model, created_at "
+            "FROM conversation_vectors WHERE embedding_model = ?"
+        )
+        params: list[object] = [embedding_model]
+        if exclude_conversation_id is not None:
+            query += " AND conversation_id != ?"
+            params.append(exclude_conversation_id)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        documents: list[StoredSemanticDocument] = []
+        for row in rows:
+            dimensions = row["dimensions"]
+            encoded = row["embedding"]
+            if not isinstance(dimensions, int) or not isinstance(encoded, bytes) or len(encoded) != dimensions * 4:
+                continue
+            documents.append(
+                StoredSemanticDocument(
+                    message_id=row["message_id"],
+                    conversation_id=row["conversation_id"],
+                    content=row["content"],
+                    embedding=list(struct.unpack(f"<{dimensions}f", encoded)),
+                    embedding_model=row["embedding_model"],
+                    created_at=_load_time(row["created_at"]),
+                )
+            )
+        return documents
+
+    def list_unindexed_semantic_turns(self, *, limit: int = 12) -> list[SemanticConversationTurn]:
+        """Find historical completed turns that have not been embedded yet."""
+        with self._connect() as connection:
+            assistant_rows = connection.execute(
+                "SELECT m.id, m.conversation_id, m.role, m.content, m.brain, m.model, m.created_at, m.rowid "
+                "FROM messages m LEFT JOIN conversation_vectors v ON v.message_id = m.id "
+                "WHERE m.role = 'assistant' AND v.message_id IS NULL AND m.content != '' "
+                "ORDER BY m.created_at, m.rowid LIMIT ?",
+                (limit,),
+            ).fetchall()
+            turns: list[SemanticConversationTurn] = []
+            for assistant in assistant_rows:
+                user = connection.execute(
+                    "SELECT id, role, content, brain, model, created_at FROM messages "
+                    "WHERE conversation_id = ? AND role = 'user' "
+                    "AND (created_at < ? OR (created_at = ? AND rowid < ?)) "
+                    "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    (
+                        assistant["conversation_id"],
+                        assistant["created_at"],
+                        assistant["created_at"],
+                        assistant["rowid"],
+                    ),
+                ).fetchone()
+                if user is None:
+                    continue
+                turns.append(
+                    SemanticConversationTurn(
+                        conversation_id=assistant["conversation_id"],
+                        user_message=self._message_from_row(connection, user),
+                        assistant_message=self._message_from_row(connection, assistant),
+                    )
+                )
+        return turns
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._database_path)
