@@ -133,6 +133,20 @@ Each chat turn allows at most three model-to-tool rounds by default. Configure
 `ATLAS_AGENT_MAX_TOOL_ROUNDS` and `ATLAS_TOOL_EXECUTION_TIMEOUT_SECONDS` in
 `.env` only when a future tool requires different limits.
 
+## Web search
+
+ATLAS can search the web through a free, self-hosted SearXNG service included
+in Docker Compose. It is read-only: ATLAS receives titles, snippets, and source
+URLs, then cites the source URLs in its answer. It does not open arbitrary web
+pages or submit forms.
+
+Search requests leave your local network when SearXNG forwards them to its
+configured public search engines. Before the first Compose start, set a unique
+`ATLAS_SEARXNG_SECRET` in `.env`, for example with `openssl rand -hex 32`.
+Keep `ATLAS_WEB_SEARCH_SAFE_SEARCH=1` for moderate filtering, or set it to `2`
+for strict filtering. SearXNG is not published on a host port; only ATLAS can
+reach it inside the Compose network.
+
 ## Obsidian notes
 
 ATLAS can search, read, and—when explicitly enabled—write Markdown notes in a

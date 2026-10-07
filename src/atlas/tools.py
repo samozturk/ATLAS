@@ -12,6 +12,7 @@ import structlog
 from atlas.llm.models import ChatMessage, MessageRole, ToolCall, ToolDefinition
 from atlas.obsidian import ObsidianError, ObsidianVault
 from atlas.weather import WeatherError, WeatherSnapshot
+from atlas.web_search import WebSearchError, WebSearchResult
 
 log = structlog.get_logger(__name__)
 
@@ -140,6 +141,54 @@ class CurrentWeatherTool:
         except WeatherError as error:
             raise ToolExecutionFailure(str(error)) from error
         return json.dumps(snapshot.model_dump(mode="json"), separators=(",", ":"))
+
+
+class WebSearchInput(ToolInput):
+    """A compact search query; ATLAS returns sources rather than browsing blindly."""
+
+    query: str = Field(min_length=2, max_length=500)
+    limit: int = Field(default=5, ge=1, le=10)
+
+
+class WebSearchReader(Protocol):
+    """Read a bounded set of public web results from an approved search adapter."""
+
+    async def search(self, query: str, *, limit: int | None = None) -> list[WebSearchResult]: ...
+
+
+class WebSearchTool:
+    """Search the public web through local SearXNG; it never writes or opens pages."""
+
+    name = "search_web"
+    description = (
+        "Search the public web for current or external information. Use when the user asks about "
+        "recent facts, news, prices, schedules, or information outside ATLAS. Return source URLs in "
+        "the answer and make clear that search queries are sent to public search engines. This tool is read-only."
+    )
+    input_model = WebSearchInput
+
+    def __init__(self, reader: WebSearchReader) -> None:
+        self._reader = reader
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            function={
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_model.model_json_schema(),
+            }
+        )
+
+    async def execute(self, arguments: WebSearchInput) -> str:
+        try:
+            results = await self._reader.search(arguments.query, limit=arguments.limit)
+        except WebSearchError as error:
+            raise ToolExecutionFailure(str(error)) from error
+        return json.dumps(
+            [result.model_dump(mode="json", exclude_none=True) for result in results],
+            separators=(",", ":"),
+        )
 
 
 class SearchObsidianNotesInput(ToolInput):

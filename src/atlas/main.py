@@ -40,9 +40,11 @@ from atlas.tools import (
     ReadObsidianNoteTool,
     SearchObsidianNotesTool,
     ToolRegistry,
+    WebSearchTool,
     WriteObsidianNoteTool,
 )
 from atlas.weather import OpenMeteoWeatherClient
+from atlas.web_search import SearxngClient
 
 log = structlog.get_logger(__name__)
 
@@ -92,6 +94,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         weather_client: OpenMeteoWeatherClient | None = app.state.weather_client
         if weather_client is not None:
             await weather_client.aclose()
+        web_search_client: SearxngClient | None = app.state.web_search_client
+        if web_search_client is not None:
+            await web_search_client.aclose()
         await app.state.semantic_recall.aclose()
         # A dedicated shutdown boundary makes later worker cleanup deterministic.
         await asyncio.sleep(0)
@@ -126,6 +131,10 @@ def create_app(
     registered_tools = [CurrentTimeTool()]
     app.state.weather_client = OpenMeteoWeatherClient(settings)
     registered_tools.append(CurrentWeatherTool(app.state.weather_client))
+    app.state.web_search_client = None
+    if settings.web_search_enabled:
+        app.state.web_search_client = SearxngClient(settings)
+        registered_tools.append(WebSearchTool(app.state.web_search_client))
     app.state.obsidian_vault = None
     if settings.obsidian_vault_path.strip():
         app.state.obsidian_vault = ObsidianVault(settings.obsidian_vault_path)

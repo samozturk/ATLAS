@@ -27,6 +27,7 @@ import {
   Plus,
   Radio,
   RefreshCw,
+  Search,
   Settings2,
   Sparkles,
   Waves,
@@ -778,12 +779,13 @@ function ToolActivityCard({ activity, isStreaming }: { activity: ToolActivity[];
     {activity.map((tool) => {
       const isWeather = tool.name === 'get_current_weather';
       const isTime = tool.name === 'get_current_time';
-      const label = isWeather ? 'Weather' : isTime ? 'Local time' : tool.name.replaceAll('_', ' ');
+      const isWebSearch = tool.name === 'search_web';
+      const label = isWeather ? 'Weather' : isTime ? 'Local time' : isWebSearch ? 'Web search' : tool.name.replaceAll('_', ' ');
       const detail = tool.ok === false ? tool.content ?? 'Tool unavailable'
         : tool.ok === true ? toolResultSummary(tool, isWeather, isTime)
         : isWeather ? tool.location ? `Checking ${tool.location}` : 'Checking Waalwijk'
-        : isTime ? 'Reading local time' : 'Using ATLAS tool';
-      const Icon = isWeather ? CloudSun : isTime ? Clock3 : Wrench;
+        : isTime ? 'Reading local time' : isWebSearch ? 'Searching the public web' : 'Using ATLAS tool';
+      const Icon = isWeather ? CloudSun : isTime ? Clock3 : isWebSearch ? Search : Wrench;
       return <div className="tool-activity-item" key={tool.id}>
         <span className={`tool-activity-icon ${isStreaming ? 'tool-activity-icon-active' : ''}`}><Icon className="size-3.5" /></span>
         <span className="min-w-0"><strong>{label}</strong><span>{isStreaming ? detail : 'Tool used for this response'}</span></span>

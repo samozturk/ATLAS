@@ -277,6 +277,17 @@ def test_chat_registers_weather_with_the_waalwijk_default() -> None:
     ]
 
 
+def test_chat_registers_web_search_when_enabled() -> None:
+    provider = FakeProvider()
+    app = create_app(Settings(environment="test", web_search_enabled=True), provider=provider)
+
+    with TestClient(app) as client:
+        response = client.post("/chat", json={"messages": [{"role": "user", "content": "Hello"}]})
+
+    assert response.status_code == 200
+    assert "search_web" in [tool.function["name"] for tool in provider.tools]
+
+
 def test_streaming_chat_persists_and_restores_a_conversation_with_tool_activity(tmp_path) -> None:
     provider = StreamingToolProvider()
     app = create_app(

@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     llm_retry_backoff_seconds: float = Field(default=0.25, ge=0, le=10)
     agent_max_tool_rounds: int = Field(default=3, ge=1, le=8)
     tool_execution_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    # Web search is an optional, read-only tool backed by a locally hosted
+    # SearXNG instance. Queries still leave the machine through its engines.
+    web_search_enabled: bool = False
+    searxng_base_url: str = "http://localhost:8080"
+    web_search_request_timeout_seconds: float = Field(default=10.0, gt=0, le=30)
+    web_search_max_results: int = Field(default=5, ge=1, le=10)
+    web_search_safe_search: int = Field(default=1, ge=0, le=2)
     database_path: str = "data/atlas.db"
     # Semantic recall is local: Ollama produces embeddings and SQLite persists
     # them beside the conversation history for bounded nearest-neighbour search.
@@ -77,6 +84,8 @@ class Settings(BaseSettings):
         "the user's agency. Use an available tool for current home information rather than "
         "guessing. Search the local Obsidian notes when the user asks about their saved "
         "knowledge, plans, or notes; do not claim to have read a note without the tool result. "
+        "Use web search for current or external information when it would improve accuracy; include the "
+        "source URLs returned by the tool and do not imply a web search happened unless it did. "
         "Write or replace an Obsidian note only when the user explicitly asks you to save it; "
         "never overwrite a note unless the user explicitly requests replacement. "
         "Be candid about uncertainty and limitations. Never claim to have "

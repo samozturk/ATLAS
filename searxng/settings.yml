@@ -1,0 +1,21 @@
+use_default_settings: true
+
+general:
+  instance_name: "ATLAS Search"
+
+search:
+  safe_search: 1
+  autocomplete: ""
+  formats:
+    - html
+    - json
+
+server:
+  # This value is replaced at runtime by SEARXNG_SECRET from Docker Compose.
+  secret_key: "replace-at-runtime"
+  # The service is only reachable by ATLAS inside Docker Compose.
+  limiter: false
+  image_proxy: true
+
+valkey:
+  url: valkey://searxng-valkey:6379/0
