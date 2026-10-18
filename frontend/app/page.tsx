@@ -30,6 +30,7 @@ import {
   Search,
   Settings2,
   Sparkles,
+  Trash2,
   Waves,
   Wrench,
   Zap,
@@ -39,6 +40,16 @@ import remarkGfm from 'remark-gfm';
 
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
 type Brain = 'fast' | 'deep';
 type WorkspaceView = 'chat' | 'memory' | 'home' | 'events';
@@ -100,9 +111,17 @@ type PersonalMemory = {
   id: string;
   fact: string;
   category: string;
-  source_conversation_id: string;
+  source_conversation_id?: string | null;
   created_at: string;
   last_confirmed_at: string;
+};
+
+type SemanticRecallStatus = {
+  enabled: boolean;
+  embedding_model: string;
+  indexed_turns: number;
+  pending_turns: number;
+  last_error?: string | null;
 };
 
 type ToolCallPayload = {
@@ -276,10 +295,13 @@ export default function HomePage() {
   const [isLoadingEvents, setIsLoadingEvents] = useState(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
   const [personalMemories, setPersonalMemories] = useState<PersonalMemory[]>([]);
+  const [semanticRecall, setSemanticRecall] = useState<SemanticRecallStatus | null>(null);
   const [isLoadingMemories, setIsLoadingMemories] = useState(false);
   const [memoriesError, setMemoriesError] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [connection, setConnection] = useState<'ready' | 'working' | 'offline'>('ready');
+  const [conversationToDelete, setConversationToDelete] = useState<ConversationSummary | null>(null);
+  const [isDeletingConversation, setIsDeletingConversation] = useState(false);
   const transcriptEnd = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -329,9 +351,13 @@ export default function HomePage() {
   const refreshMemories = async () => {
     setIsLoadingMemories(true);
     try {
-      const response = await fetch('/memories?limit=100');
-      if (!response.ok) throw new Error('ATLAS could not load your personal memory.');
-      setPersonalMemories(await response.json() as PersonalMemory[]);
+      const [memoriesResponse, recallResponse] = await Promise.all([
+        fetch('/memories?limit=100'),
+        fetch('/semantic-recall/status'),
+      ]);
+      if (!memoriesResponse.ok) throw new Error('ATLAS could not load your personal memory.');
+      setPersonalMemories(await memoriesResponse.json() as PersonalMemory[]);
+      setSemanticRecall(recallResponse.ok ? await recallResponse.json() as SemanticRecallStatus : null);
       setMemoriesError(null);
     } catch (error) {
       setMemoriesError(error instanceof Error ? error.message : 'ATLAS could not load your personal memory.');
@@ -467,6 +493,28 @@ export default function HomePage() {
     }
   };
 
+  const deleteConversation = async () => {
+    const selected = conversationToDelete;
+    if (!selected || isDeletingConversation) return;
+    setIsDeletingConversation(true);
+    try {
+      const response = await fetch(`/conversations/${selected.id}`, { method: 'DELETE' });
+      if (!response.ok) throw new Error('ATLAS could not delete this conversation.');
+      const remaining = conversations.filter((conversation) => conversation.id !== selected.id);
+      setConversations(remaining);
+      setConversationToDelete(null);
+      if (conversationId === selected.id) {
+        if (remaining[0]) await loadConversation(remaining[0].id);
+        else await createConversation();
+      }
+      setConnection('ready');
+    } catch {
+      setConnection('offline');
+    } finally {
+      setIsDeletingConversation(false);
+    }
+  };
+
   const selectWorkspaceView = (view: WorkspaceView) => {
     setWorkspaceView(view);
     if (view === 'memory') void refreshMemories();
@@ -523,7 +571,10 @@ export default function HomePage() {
               <div className="mt-6 border-t border-white/[0.06] pt-4">
                 <p className="px-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">Recent conversations</p>
                 <div className="mt-2 space-y-1">
-                  {conversations.slice(0, 6).map((conversation) => <button key={conversation.id} type="button" onClick={() => void selectConversation(conversation.id)} className={`conversation-item ${conversation.id === conversationId ? 'conversation-item-active' : ''}`} title={conversation.title}>{conversation.title}</button>)}
+                  {conversations.slice(0, 6).map((conversation) => <div className="conversation-row" key={conversation.id}>
+                    <button type="button" onClick={() => void selectConversation(conversation.id)} className={`conversation-item ${conversation.id === conversationId ? 'conversation-item-active' : ''}`} title={conversation.title}>{conversation.title}</button>
+                    <Button type="button" variant="ghost" size="icon-xs" className="conversation-delete text-slate-500 hover:bg-rose-500/10 hover:text-rose-300" aria-label={`Delete ${conversation.title}`} title="Delete conversation" disabled={isStreaming} onClick={(event) => { event.stopPropagation(); setConversationToDelete(conversation); }}><Trash2 className="size-3" /></Button>
+                  </div>)}
                 </div>
               </div>
             </div>
@@ -563,6 +614,7 @@ export default function HomePage() {
               isLoadingEvents={isLoadingEvents}
               eventsError={eventsError}
               personalMemories={personalMemories}
+              semanticRecall={semanticRecall}
               isLoadingMemories={isLoadingMemories}
               memoriesError={memoriesError}
               onRefresh={() => {
@@ -590,6 +642,22 @@ export default function HomePage() {
         </div>
         <footer className="flex items-center justify-between gap-3 px-2 pt-3 text-[10px] font-medium text-slate-600"><span className="truncate normal-case tracking-normal">A.T.L.A.S. = Adaptive, Thoughtful, Local Assistant System</span><span className="flex shrink-0 items-center gap-1.5 uppercase tracking-[0.16em]"><Sparkles className="size-3 text-cyan-300/70" />Phase 2 interface</span></footer>
       </section>
+      <AlertDialog open={conversationToDelete !== null} onOpenChange={(open) => { if (!open && !isDeletingConversation) setConversationToDelete(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this conversation?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes its messages, tool history, and local recall vectors. Your separate personal-memory profile will stay intact.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeletingConversation}>Cancel</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={() => void deleteConversation()} disabled={isDeletingConversation}>
+              {isDeletingConversation ? 'Deleting…' : 'Delete conversation'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </main>
   );
 }
@@ -606,6 +674,7 @@ function WorkspacePanel({
   isLoadingEvents,
   eventsError,
   personalMemories,
+  semanticRecall,
   isLoadingMemories,
   memoriesError,
   onRefresh,
@@ -617,6 +686,7 @@ function WorkspacePanel({
   isLoadingEvents: boolean;
   eventsError: string | null;
   personalMemories: PersonalMemory[];
+  semanticRecall: SemanticRecallStatus | null;
   isLoadingMemories: boolean;
   memoriesError: string | null;
   onRefresh: () => void;
@@ -639,6 +709,7 @@ function WorkspacePanel({
           conversations={conversations}
           messages={messages}
           memories={personalMemories}
+          semanticRecall={semanticRecall}
           isLoading={isLoadingMemories}
           error={memoriesError}
         /> : <EventsView
@@ -656,12 +727,14 @@ function MemoryView({
   conversations,
   messages,
   memories,
+  semanticRecall,
   isLoading,
   error,
 }: {
   conversations: ConversationSummary[];
   messages: Message[];
   memories: PersonalMemory[];
+  semanticRecall: SemanticRecallStatus | null;
   isLoading: boolean;
   error: string | null;
 }) {
@@ -685,6 +758,17 @@ function MemoryView({
           <time>Last confirmed {formatMemoryTime(memory.last_confirmed_at)}</time>
         </article>)}
       </div> : null}
+    </section>
+    <section className="workspace-card">
+      <p className="eyebrow">Past-chat recall</p>
+      {!semanticRecall ? <p className="workspace-muted mt-3">Recall status is unavailable. Refresh to check the local index.</p> : !semanticRecall.enabled ? <p className="workspace-muted mt-3">Past-chat recall is disabled for this ATLAS runtime.</p> : semanticRecall.last_error ? <p className="workspace-muted mt-3 text-amber-200">Recall needs the local <code>{semanticRecall.embedding_model}</code> embedding model. Run <code>ollama pull {semanticRecall.embedding_model}</code>; ATLAS will retry automatically. Last error: {semanticRecall.last_error}</p> : <>
+        <div className="workspace-metrics mt-3">
+          <Metric icon={<History />} label="Indexed exchanges" value={String(semanticRecall.indexed_turns)} />
+          <Metric icon={<Clock3 />} label="Waiting to index" value={String(semanticRecall.pending_turns)} />
+          <Metric icon={<BrainCircuit />} label="Embedding model" value={semanticRecall.embedding_model} />
+        </div>
+        <p className="workspace-muted mt-3">ATLAS adds only relevant excerpts from other chats. It excludes the open conversation because its full history is already in context.</p>
+      </>}
     </section>
     <section className="workspace-card">
       <p className="eyebrow">What ATLAS keeps</p>

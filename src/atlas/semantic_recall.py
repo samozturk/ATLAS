@@ -1,5 +1,6 @@
 """Local vector-backed retrieval of relevant excerpts from earlier conversations."""
 
+import asyncio
 import math
 from collections.abc import Sequence
 
@@ -21,6 +22,16 @@ class SemanticRecall(BaseModel):
     conversation_id: str
 
 
+class SemanticRecallStatus(BaseModel):
+    """The locally observable state of past-conversation recall."""
+
+    enabled: bool
+    embedding_model: str
+    indexed_turns: int = 0
+    pending_turns: int = 0
+    last_error: str | None = None
+
+
 class SemanticRecallService:
     """Persist local embeddings and retrieve only small, relevant prior excerpts."""
 
@@ -33,12 +44,18 @@ class SemanticRecallService:
         self._settings = settings
         self._store = store
         self._embedding_client = embedding_client
+        self._last_error: str | None = None
 
     async def index_turn(self, turn: SemanticConversationTurn) -> None:
         """Embed a newly completed exchange without ever failing the chat response."""
         if not self._settings.semantic_retrieval_enabled:
             return
-        await self._index_turns([turn])
+        try:
+            await self._index_turns([turn])
+        except EmbeddingError as error:
+            self._last_error = str(error)
+            raise
+        self._last_error = None
 
     async def backfill(self) -> int:
         """Embed historical completed turns in batches when ATLAS starts."""
@@ -46,17 +63,39 @@ class SemanticRecallService:
             return 0
         indexed = 0
         while turns := self._store.list_unindexed_semantic_turns(
+            embedding_model=self._settings.embedding_model,
             limit=self._settings.semantic_backfill_batch_size
         ):
             try:
                 await self._index_turns(turns)
             except EmbeddingError as error:
+                self._last_error = str(error)
                 log.warning("semantic_recall.backfill_paused", detail=str(error))
                 return indexed
             indexed += len(turns)
+            self._last_error = None
         if indexed:
             log.info("semantic_recall.backfill_complete", indexed=indexed)
         return indexed
+
+    async def run_backfill(self) -> None:
+        """Retry pending indexing so pulling a model needs no service restart."""
+        while True:
+            await self.backfill()
+            await asyncio.sleep(self._settings.semantic_backfill_interval_seconds)
+
+    def status(self) -> SemanticRecallStatus:
+        """Expose only local indexing health, never chat or vector contents."""
+        indexed, pending = self._store.semantic_recall_counts(
+            embedding_model=self._settings.embedding_model
+        )
+        return SemanticRecallStatus(
+            enabled=self._settings.semantic_retrieval_enabled,
+            embedding_model=self._settings.embedding_model,
+            indexed_turns=indexed,
+            pending_turns=pending,
+            last_error=self._last_error,
+        )
 
     async def recall(
         self, query: str, *, exclude_conversation_id: str | None = None
@@ -70,7 +109,14 @@ class SemanticRecallService:
         )
         if not candidates:
             return []
-        query_vector = (await self._embedding_client.embed([query], model=self._settings.embedding_model))[0]
+        try:
+            query_vector = (await self._embedding_client.embed(
+                [query], model=self._settings.embedding_model
+            ))[0]
+        except EmbeddingError as error:
+            self._last_error = str(error)
+            raise
+        self._last_error = None
         ranked = [
             SemanticRecall(
                 content=document.content,

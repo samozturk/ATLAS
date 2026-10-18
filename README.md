@@ -233,10 +233,10 @@ interval, or per-conversation cap with `ATLAS_MEMORY_IDLE_SECONDS`,
 
 ATLAS also has a local SQLite-backed vector store for relevant past-chat recall.
 It embeds each completed user/assistant exchange with Ollama, then adds only the
-closest excerpts from other conversations to a new chat request. It first
-backfills existing completed conversations after startup, then indexes each new
-turn in the background. The current conversation is excluded because its full
-history is already present in the prompt.
+closest excerpts from other conversations to a new chat request. It backfills
+existing completed conversations on startup, retries pending work in the
+background, and indexes each new turn. The current conversation is excluded
+because its full history is already present in the prompt.
 
 Pull the local embedding model once on the machine running Ollama:
 
@@ -249,7 +249,8 @@ The default `ATLAS_SEMANTIC_RETRIEVAL_ENABLED=true` keeps all vectors in
 the model, result count, similarity threshold, and prompt budget with the
 `ATLAS_EMBEDDING_MODEL`, `ATLAS_SEMANTIC_RETRIEVAL_LIMIT`,
 `ATLAS_SEMANTIC_RETRIEVAL_MIN_SIMILARITY`, and
-`ATLAS_SEMANTIC_RETRIEVAL_MAX_CONTEXT_CHARS` settings.
+`ATLAS_SEMANTIC_RETRIEVAL_MAX_CONTEXT_CHARS` settings. The Memory view reports
+the indexed and pending exchange counts and any local embedding error.
 
 For Tailnet access, Compose allows the configured Studio hostname (`cortex`) to
 reach Vite. If you rename that machine or use a different MagicDNS hostname,

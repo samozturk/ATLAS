@@ -71,7 +71,9 @@ class PersonalMemory(BaseModel):
     id: str
     fact: str
     category: str
-    source_conversation_id: str
+    # A user may remove the source chat while retaining their separately
+    # managed profile, in which case this provenance is intentionally blank.
+    source_conversation_id: str | None = None
     created_at: datetime
     last_confirmed_at: datetime
 
@@ -159,20 +161,21 @@ class ConversationStore:
                     fact TEXT NOT NULL,
                     category TEXT NOT NULL,
                     fingerprint TEXT NOT NULL UNIQUE,
-                    source_conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                    source_conversation_id TEXT,
                     created_at TEXT NOT NULL,
                     last_confirmed_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS personal_memories_last_confirmed_at
                     ON personal_memories(last_confirmed_at DESC);
                 CREATE TABLE IF NOT EXISTS conversation_vectors (
-                    message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+                    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
                     conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
                     content TEXT NOT NULL,
                     embedding BLOB NOT NULL,
                     dimensions INTEGER NOT NULL,
                     embedding_model TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (message_id, embedding_model)
                 );
                 CREATE INDEX IF NOT EXISTS conversation_vectors_model_created_at
                     ON conversation_vectors(embedding_model, created_at DESC);
@@ -183,6 +186,9 @@ class ConversationStore:
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(conversations)")}
             if "memory_scanned_at" not in columns:
                 connection.execute("ALTER TABLE conversations ADD COLUMN memory_scanned_at TEXT")
+            self._migrate_personal_memories(connection)
+            self._migrate_conversation_vectors(connection)
+            connection.execute("PRAGMA optimize")
 
     def create_conversation(self) -> ConversationSummary:
         now = _now()
@@ -206,6 +212,23 @@ class ConversationStore:
                 "ORDER BY updated_at DESC, created_at DESC"
             ).fetchall()
         return [self._summary_from_row(row) for row in rows]
+
+    def delete_conversation(self, conversation_id: str) -> None:
+        """Delete one chat and its dependent history without deleting profile facts."""
+        with self._connect() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+            if exists is None:
+                raise ConversationNotFoundError(conversation_id)
+            # Memories are a separate user-visible profile. Preserve them while
+            # removing a deleted chat as their now-unavailable provenance.
+            connection.execute(
+                "UPDATE personal_memories SET source_conversation_id = NULL "
+                "WHERE source_conversation_id = ?",
+                (conversation_id,),
+            )
+            connection.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
 
     def get_conversation(self, conversation_id: str) -> StoredConversation:
         with self._connect() as connection:
@@ -442,7 +465,7 @@ class ConversationStore:
                 "INSERT INTO conversation_vectors "
                 "(message_id, conversation_id, content, embedding, dimensions, embedding_model, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(message_id) DO UPDATE SET content = excluded.content, embedding = excluded.embedding, "
+                "ON CONFLICT(message_id, embedding_model) DO UPDATE SET content = excluded.content, embedding = excluded.embedding, "
                 "dimensions = excluded.dimensions, embedding_model = excluded.embedding_model, "
                 "created_at = excluded.created_at",
                 (
@@ -494,15 +517,18 @@ class ConversationStore:
             )
         return documents
 
-    def list_unindexed_semantic_turns(self, *, limit: int = 12) -> list[SemanticConversationTurn]:
+    def list_unindexed_semantic_turns(
+        self, *, embedding_model: str, limit: int = 12
+    ) -> list[SemanticConversationTurn]:
         """Find historical completed turns that have not been embedded yet."""
         with self._connect() as connection:
             assistant_rows = connection.execute(
                 "SELECT m.id, m.conversation_id, m.role, m.content, m.brain, m.model, m.created_at, m.rowid "
-                "FROM messages m LEFT JOIN conversation_vectors v ON v.message_id = m.id "
+                "FROM messages m LEFT JOIN conversation_vectors v "
+                "ON v.message_id = m.id AND v.embedding_model = ? "
                 "WHERE m.role = 'assistant' AND v.message_id IS NULL AND m.content != '' "
                 "ORDER BY m.created_at, m.rowid LIMIT ?",
-                (limit,),
+                (embedding_model, limit),
             ).fetchall()
             turns: list[SemanticConversationTurn] = []
             for assistant in assistant_rows:
@@ -528,6 +554,85 @@ class ConversationStore:
                     )
                 )
         return turns
+
+    def semantic_recall_counts(self, *, embedding_model: str) -> tuple[int, int]:
+        """Return completed exchanges indexed and pending for one embedding model."""
+        with self._connect() as connection:
+            indexed = connection.execute(
+                "SELECT COUNT(*) FROM conversation_vectors WHERE embedding_model = ?",
+                (embedding_model,),
+            ).fetchone()[0]
+            pending = connection.execute(
+                "SELECT COUNT(*) FROM messages m LEFT JOIN conversation_vectors v "
+                "ON v.message_id = m.id AND v.embedding_model = ? "
+                "WHERE m.role = 'assistant' AND m.content != '' AND v.message_id IS NULL",
+                (embedding_model,),
+            ).fetchone()[0]
+        return int(indexed), int(pending)
+
+    @staticmethod
+    def _migrate_personal_memories(connection: sqlite3.Connection) -> None:
+        """Make legacy personal-memory provenance optional before chat deletion."""
+        columns = {
+            row["name"]: row for row in connection.execute("PRAGMA table_info(personal_memories)")
+        }
+        source = columns.get("source_conversation_id")
+        has_source_foreign_key = bool(
+            connection.execute("PRAGMA foreign_key_list(personal_memories)").fetchall()
+        )
+        if source is None or (not source["notnull"] and not has_source_foreign_key):
+            return
+        connection.execute("DROP INDEX IF EXISTS personal_memories_last_confirmed_at")
+        connection.execute("ALTER TABLE personal_memories RENAME TO personal_memories_legacy")
+        connection.execute(
+            "CREATE TABLE personal_memories ("
+            "id TEXT PRIMARY KEY, fact TEXT NOT NULL, category TEXT NOT NULL, "
+            "fingerprint TEXT NOT NULL UNIQUE, source_conversation_id TEXT, "
+            "created_at TEXT NOT NULL, last_confirmed_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO personal_memories "
+            "(id, fact, category, fingerprint, source_conversation_id, created_at, last_confirmed_at) "
+            "SELECT id, fact, category, fingerprint, source_conversation_id, created_at, last_confirmed_at "
+            "FROM personal_memories_legacy"
+        )
+        connection.execute("DROP TABLE personal_memories_legacy")
+        connection.execute(
+            "CREATE INDEX personal_memories_last_confirmed_at "
+            "ON personal_memories(last_confirmed_at DESC)"
+        )
+
+    @staticmethod
+    def _migrate_conversation_vectors(connection: sqlite3.Connection) -> None:
+        """Allow a new embedding model to reindex without losing old vectors."""
+        columns = {
+            row["name"]: row for row in connection.execute("PRAGMA table_info(conversation_vectors)")
+        }
+        message = columns.get("message_id")
+        embedding_model = columns.get("embedding_model")
+        if message is None or embedding_model is None or (message["pk"] == 1 and embedding_model["pk"] == 2):
+            return
+        connection.execute("DROP INDEX IF EXISTS conversation_vectors_model_created_at")
+        connection.execute("ALTER TABLE conversation_vectors RENAME TO conversation_vectors_legacy")
+        connection.execute(
+            "CREATE TABLE conversation_vectors ("
+            "message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, "
+            "conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, "
+            "content TEXT NOT NULL, embedding BLOB NOT NULL, dimensions INTEGER NOT NULL, "
+            "embedding_model TEXT NOT NULL, created_at TEXT NOT NULL, "
+            "PRIMARY KEY (message_id, embedding_model))"
+        )
+        connection.execute(
+            "INSERT INTO conversation_vectors "
+            "(message_id, conversation_id, content, embedding, dimensions, embedding_model, created_at) "
+            "SELECT message_id, conversation_id, content, embedding, dimensions, embedding_model, created_at "
+            "FROM conversation_vectors_legacy"
+        )
+        connection.execute("DROP TABLE conversation_vectors_legacy")
+        connection.execute(
+            "CREATE INDEX conversation_vectors_model_created_at "
+            "ON conversation_vectors(embedding_model, created_at DESC)"
+        )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._database_path)

@@ -325,3 +325,23 @@ def test_streaming_chat_persists_and_restores_a_conversation_with_tool_activity(
     assert messages[1]["tool_activity"][0]["tool_name"] == "get_current_time"
     assert messages[1]["tool_activity"][0]["ok"] is True
     assert summaries.json()[0]["title"] == "What time is it?"
+
+
+def test_conversation_delete_endpoint_removes_a_saved_chat(tmp_path) -> None:
+    app = create_app(
+        Settings(
+            environment="test",
+            database_path=str(tmp_path / "atlas.db"),
+            semantic_retrieval_enabled=False,
+        ),
+        provider=FakeProvider(),
+    )
+
+    with TestClient(app) as client:
+        created = client.post("/conversations")
+        conversation_id = created.json()["id"]
+        deleted = client.delete(f"/conversations/{conversation_id}")
+        missing = client.get(f"/conversations/{conversation_id}")
+
+    assert deleted.status_code == 204
+    assert missing.status_code == 404

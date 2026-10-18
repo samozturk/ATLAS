@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 import structlog
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -33,7 +33,7 @@ from atlas.logging import configure_logging
 from atlas.mqtt import MQTTEventAdapter
 from atlas.memory import PersonalMemoryWorker
 from atlas.obsidian import ObsidianVault
-from atlas.semantic_recall import SemanticRecallService
+from atlas.semantic_recall import SemanticRecallService, SemanticRecallStatus
 from atlas.tools import (
     CurrentTimeTool,
     CurrentWeatherTool,
@@ -66,7 +66,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.personal_memory_worker.run(), name="atlas-personal-memory"
     )
     app.state.semantic_backfill_task = asyncio.create_task(
-        app.state.semantic_recall.backfill(), name="atlas-semantic-backfill"
+        app.state.semantic_recall.run_backfill(), name="atlas-semantic-backfill"
     )
     if settings.mqtt_enabled:
         app.state.mqtt_task = asyncio.create_task(app.state.mqtt_adapter.run(), name="atlas-mqtt")
@@ -79,7 +79,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         memory_task: asyncio.Task[None] = app.state.memory_task
         memory_task.cancel()
         await asyncio.gather(memory_task, return_exceptions=True)
-        semantic_backfill_task: asyncio.Task[int] = app.state.semantic_backfill_task
+        semantic_backfill_task: asyncio.Task[None] = app.state.semantic_backfill_task
         semantic_backfill_task.cancel()
         await asyncio.gather(semantic_backfill_task, return_exceptions=True)
         semantic_index_tasks = list(app.state.semantic_index_tasks)
@@ -243,6 +243,10 @@ def create_app(
     async def list_personal_memories(limit: int = Query(default=100, ge=1, le=200)) -> list[PersonalMemory]:
         return app.state.conversation_store.list_personal_memories(limit=limit)
 
+    @app.get("/semantic-recall/status", response_model=SemanticRecallStatus, tags=["memory"])
+    async def semantic_recall_status() -> SemanticRecallStatus:
+        return app.state.semantic_recall.status()
+
     @app.post("/conversations", response_model=ConversationSummary, status_code=status.HTTP_201_CREATED, tags=["conversations"])
     async def create_conversation() -> ConversationSummary:
         return app.state.conversation_store.create_conversation()
@@ -257,6 +261,18 @@ def create_app(
             return app.state.conversation_store.get_conversation(conversation_id)
         except ConversationNotFoundError as error:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.") from error
+
+    @app.delete(
+        "/conversations/{conversation_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["conversations"],
+    )
+    async def delete_conversation(conversation_id: str) -> Response:
+        try:
+            app.state.conversation_store.delete_conversation(conversation_id)
+        except ConversationNotFoundError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.") from error
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.post("/chat", response_model=ChatResponse, tags=["chat"])
     async def chat(request: ChatRequest) -> ChatResponse:
