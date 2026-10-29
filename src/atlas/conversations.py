@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from atlas.llm.models import Brain, ConversationMessage
+from atlas.llm.models import Brain, ConversationMessage, RecallSource
 from atlas.events import AtlasEvent
 
 
@@ -39,6 +39,9 @@ class StoredMessage(BaseModel):
     model: str | None = None
     created_at: datetime
     tool_activity: list[StoredToolActivity] = Field(default_factory=list)
+    # This is deliberately provenance only. Recalled excerpts remain transient
+    # context for the model and are never stored alongside the response.
+    recall_sources: list[RecallSource] = Field(default_factory=list)
 
     def as_conversation_message(self) -> ConversationMessage:
         return ConversationMessage(role=self.role, content=self.content)
@@ -131,6 +134,7 @@ class ConversationStore:
                     content TEXT NOT NULL,
                     brain TEXT,
                     model TEXT,
+                    recall_sources_json TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS messages_conversation_created_at
@@ -186,6 +190,11 @@ class ConversationStore:
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(conversations)")}
             if "memory_scanned_at" not in columns:
                 connection.execute("ALTER TABLE conversations ADD COLUMN memory_scanned_at TEXT")
+            message_columns = {row["name"] for row in connection.execute("PRAGMA table_info(messages)")}
+            if "recall_sources_json" not in message_columns:
+                connection.execute(
+                    "ALTER TABLE messages ADD COLUMN recall_sources_json TEXT NOT NULL DEFAULT '[]'"
+                )
             self._migrate_personal_memories(connection)
             self._migrate_conversation_vectors(connection)
             connection.execute("PRAGMA optimize")
@@ -239,7 +248,7 @@ class ConversationStore:
             if conversation is None:
                 raise ConversationNotFoundError(conversation_id)
             message_rows = connection.execute(
-                "SELECT id, role, content, brain, model, created_at FROM messages "
+                "SELECT id, role, content, brain, model, recall_sources_json, created_at FROM messages "
                 "WHERE conversation_id = ? ORDER BY created_at, rowid",
                 (conversation_id,),
             ).fetchall()
@@ -255,6 +264,7 @@ class ConversationStore:
         brain: Brain | None = None,
         model: str | None = None,
         tool_activity: list[StoredToolActivity] | None = None,
+        recall_sources: list[RecallSource] | None = None,
     ) -> StoredMessage:
         now = _now()
         message = StoredMessage(
@@ -265,6 +275,7 @@ class ConversationStore:
             model=model,
             created_at=now,
             tool_activity=tool_activity or [],
+            recall_sources=recall_sources or [],
         )
         with self._connect() as connection:
             existing = connection.execute(
@@ -273,8 +284,9 @@ class ConversationStore:
             if existing is None:
                 raise ConversationNotFoundError(conversation_id)
             connection.execute(
-                "INSERT INTO messages (id, conversation_id, role, content, brain, model, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO messages "
+                "(id, conversation_id, role, content, brain, model, recall_sources_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     message.id,
                     conversation_id,
@@ -282,6 +294,10 @@ class ConversationStore:
                     message.content,
                     message.brain.value if message.brain is not None else None,
                     message.model,
+                    json.dumps(
+                        [source.model_dump(mode="json") for source in message.recall_sources],
+                        separators=(",", ":"),
+                    ),
                     _dump_time(message.created_at),
                 ),
             )
@@ -656,6 +672,18 @@ class ConversationStore:
             "FROM tool_activity WHERE message_id = ? ORDER BY id",
             (row["id"],),
         ).fetchall()
+        raw_recall_sources = row["recall_sources_json"] if "recall_sources_json" in row.keys() else "[]"
+        try:
+            serialized_sources = json.loads(raw_recall_sources)
+        except (TypeError, json.JSONDecodeError):
+            serialized_sources = []
+        recall_sources: list[RecallSource] = []
+        if isinstance(serialized_sources, list):
+            for source in serialized_sources:
+                try:
+                    recall_sources.append(RecallSource.model_validate(source))
+                except ValueError:
+                    continue
         return StoredMessage(
             id=row["id"],
             role=row["role"],
@@ -673,6 +701,7 @@ class ConversationStore:
                 )
                 for tool_row in tool_rows
             ],
+            recall_sources=recall_sources,
         )
 
 

@@ -185,6 +185,7 @@ def test_existing_database_migrates_for_chat_deletion_and_model_reindexing(tmp_p
     store = ConversationStore(str(database_path))
     store.initialize()
 
+    assert store.get_conversation("chat").messages[1].recall_sources == []
     assert len(store.list_semantic_documents(embedding_model="old")) == 1
     assert len(store.list_unindexed_semantic_turns(embedding_model="new")) == 1
     store.delete_conversation("chat")

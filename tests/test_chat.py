@@ -376,10 +376,15 @@ def test_streaming_chat_reports_when_it_uses_an_earlier_conversation(tmp_path) -
                 "messages": [{"role": "user", "content": "Can you use my coffee preference from before?"}],
             },
         )
+        restored = client.get(f"/conversations/{target['id']}")
 
     assert response.status_code == 200
     assert 'event: recall' in response.text
     assert "Remember my coffee preference" in response.text
+    assert restored.status_code == 200
+    recall_sources = restored.json()["messages"][-1]["recall_sources"]
+    assert [source["conversation_id"] for source in recall_sources] == [source.id]
+    assert recall_sources[0]["title"] != "New conversation"
 
 
 def test_conversation_delete_endpoint_removes_a_saved_chat(tmp_path) -> None:

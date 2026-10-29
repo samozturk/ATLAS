@@ -86,6 +86,7 @@ type StoredMessage = {
   content: string;
   brain?: Brain;
   model?: string;
+  recall_sources?: RecallSource[];
   tool_activity?: Array<{
     tool_call_id?: string;
     tool_name: string;
@@ -308,6 +309,7 @@ function messageFromStored(message: StoredMessage): Message {
     brain: message.brain,
     model: message.model,
     toolActivity: toolActivityFromStored(message.tool_activity),
+    recallSources: message.recall_sources,
   };
 }
 

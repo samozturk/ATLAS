@@ -395,6 +395,7 @@ def create_app(
                 content=completion.message.content,
                 brain=request.brain,
                 model=completion.model,
+                recall_sources=recall_sources,
             )
             schedule_semantic_index(
                 SemanticConversationTurn(
@@ -453,6 +454,7 @@ def create_app(
                         brain=request.brain,
                         model=model,
                         tool_activity=tool_activity,
+                        recall_sources=recall_sources,
                     )
                     schedule_semantic_index(
                         SemanticConversationTurn(
