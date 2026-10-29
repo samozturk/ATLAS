@@ -334,6 +334,7 @@ export default function HomePage() {
   const [connection, setConnection] = useState<'ready' | 'working' | 'offline'>('ready');
   const [conversationToDelete, setConversationToDelete] = useState<ConversationSummary | null>(null);
   const [isDeletingConversation, setIsDeletingConversation] = useState(false);
+  const [conversationDeleteError, setConversationDeleteError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [systemHealth, setSystemHealth] = useState<SystemHealthStatus | null>(null);
   const [isLoadingSystemHealth, setIsLoadingSystemHealth] = useState(false);
@@ -601,6 +602,7 @@ export default function HomePage() {
     const selected = conversationToDelete;
     if (!selected || isDeletingConversation) return;
     setIsDeletingConversation(true);
+    setConversationDeleteError(null);
     try {
       const response = await fetch(`/conversations/${selected.id}`, { method: 'DELETE' });
       if (!response.ok) throw new Error('ATLAS could not delete this conversation.');
@@ -612,8 +614,9 @@ export default function HomePage() {
         else await createConversation();
       }
       setConnection('ready');
-    } catch {
+    } catch (error) {
       setConnection('offline');
+      setConversationDeleteError(error instanceof Error ? error.message : 'ATLAS could not delete this conversation.');
     } finally {
       setIsDeletingConversation(false);
     }
@@ -677,9 +680,10 @@ export default function HomePage() {
                 <div className="mt-2 space-y-1">
                   {conversations.slice(0, 6).map((conversation) => <div className="conversation-row" key={conversation.id}>
                     <button type="button" onClick={() => void selectConversation(conversation.id)} className={`conversation-item ${conversation.id === conversationId ? 'conversation-item-active' : ''}`} title={conversation.title}>{conversation.title}</button>
-                    <Button type="button" variant="ghost" size="icon-xs" className="conversation-delete text-slate-500 hover:bg-rose-500/10 hover:text-rose-300" aria-label={`Delete ${conversation.title}`} title="Delete conversation" disabled={isStreaming} onClick={(event) => { event.stopPropagation(); setConversationToDelete(conversation); }}><Trash2 className="size-3" /></Button>
+                    {conversationToDelete?.id === conversation.id ? <div className="conversation-delete-confirm"><Button type="button" variant="ghost" size="xs" onClick={() => { setConversationToDelete(null); setConversationDeleteError(null); }} disabled={isDeletingConversation}>Keep</Button><Button type="button" variant="destructive" size="xs" onClick={() => void deleteConversation()} disabled={isDeletingConversation}>{isDeletingConversation ? '…' : 'Delete'}</Button></div> : <Button type="button" variant="ghost" size="icon-xs" className="conversation-delete text-slate-500 hover:bg-rose-500/10 hover:text-rose-300" aria-label={`Delete ${conversation.title}`} title="Delete conversation" disabled={isStreaming} onClick={() => { setConversationDeleteError(null); setConversationToDelete(conversation); }}><Trash2 className="size-3" /></Button>}
                   </div>)}
                 </div>
+                {conversationDeleteError ? <p className="conversation-delete-error">{conversationDeleteError}</p> : null}
               </div>
             </div>
             <div className="rounded-2xl border border-white/[0.07] bg-black/20 p-3">
@@ -750,22 +754,6 @@ export default function HomePage() {
         </div>
         <footer className="flex items-center justify-between gap-3 px-2 pt-3 text-[10px] font-medium text-slate-600"><span className="truncate normal-case tracking-normal">A.T.L.A.S. = Adaptive, Thoughtful, Local Assistant System</span><span className="flex shrink-0 items-center gap-1.5 uppercase tracking-[0.16em]"><Sparkles className="size-3 text-cyan-300/70" />Phase 2 interface</span></footer>
       </section>
-      <AlertDialog open={conversationToDelete !== null} onOpenChange={(open) => { if (!open && !isDeletingConversation) setConversationToDelete(null); }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete this conversation?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This permanently removes its messages, tool history, and local recall vectors. Your separate personal-memory profile will stay intact.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={isDeletingConversation}>Cancel</AlertDialogCancel>
-            <AlertDialogAction variant="destructive" onClick={() => void deleteConversation()} disabled={isDeletingConversation}>
-              {isDeletingConversation ? 'Deleting…' : 'Delete conversation'}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
       <AlertDialog open={settingsOpen} onOpenChange={setSettingsOpen}>
         <AlertDialogContent className="system-health-dialog">
           <AlertDialogHeader>
