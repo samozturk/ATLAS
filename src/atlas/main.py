@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Literal
 
 import structlog
 import uvicorn
@@ -26,7 +27,7 @@ from atlas.conversations import (
 from atlas.embeddings import EmbeddingError, OllamaEmbeddingClient
 from atlas.events import AtlasEvent
 from atlas.llm.models import ChatRequest, ChatResponse, ConversationMessage, ToolCall
-from atlas.llm.ollama import OllamaProvider
+from atlas.llm.ollama import OllamaCatalogError, OllamaModelCatalog, OllamaProvider
 from atlas.llm.provider import LLMError, LLMProvider
 from atlas.llm.service import ChatService
 from atlas.logging import configure_logging
@@ -53,6 +54,27 @@ class HealthStatus(BaseModel):
     status: str
     service: str
     environment: str
+
+
+class ConfiguredModelStatus(BaseModel):
+    role: Literal["fast", "deep", "embedding"]
+    model: str
+    installed: bool | None
+
+
+class IntegrationStatus(BaseModel):
+    name: str
+    enabled: bool
+    detail: str
+
+
+class SystemHealthStatus(BaseModel):
+    status: Literal["ready", "degraded"]
+    ollama_reachable: bool
+    ollama_error: str | None = None
+    models: list[ConfiguredModelStatus]
+    semantic_recall: SemanticRecallStatus
+    integrations: list[IntegrationStatus]
 
 
 @asynccontextmanager
@@ -98,6 +120,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if web_search_client is not None:
             await web_search_client.aclose()
         await app.state.semantic_recall.aclose()
+        await app.state.ollama_catalog.aclose()
         # A dedicated shutdown boundary makes later worker cleanup deterministic.
         await asyncio.sleep(0)
         log.info("atlas.stopped", system_event=AtlasEvent(type="system.stopped").model_dump(mode="json"))
@@ -107,6 +130,7 @@ def create_app(
     settings: Settings | None = None,
     provider: LLMProvider | None = None,
     embedding_client: OllamaEmbeddingClient | None = None,
+    ollama_catalog: OllamaModelCatalog | None = None,
 ) -> FastAPI:
     """Build ATLAS without starting the server, enabling reliable tests."""
     settings = settings or get_settings()
@@ -119,6 +143,7 @@ def create_app(
     app.state.conversation_store = ConversationStore(settings.database_path)
     app.state.mqtt_adapter = MQTTEventAdapter(settings, app.state.conversation_store.record_event)
     app.state.llm_provider = provider or OllamaProvider(settings)
+    app.state.ollama_catalog = ollama_catalog or OllamaModelCatalog(settings)
     app.state.semantic_recall = SemanticRecallService(
         settings,
         app.state.conversation_store,
@@ -234,6 +259,68 @@ def create_app(
         if not app.state.ready:
             return HealthStatus(status="starting", service=settings.app_name, environment=settings.environment)
         return HealthStatus(status="ok", service=settings.app_name, environment=settings.environment)
+
+    @app.get("/system-health", response_model=SystemHealthStatus, tags=["health"])
+    async def system_health() -> SystemHealthStatus:
+        configured_models = [
+            ("fast", settings.fast_model),
+            ("deep", settings.deep_model),
+            ("embedding", settings.embedding_model),
+        ]
+        installed_models: set[str] | None = None
+        ollama_error: str | None = None
+        try:
+            installed_models = await app.state.ollama_catalog.model_names()
+        except OllamaCatalogError as error:
+            ollama_error = str(error)
+        models = [
+            ConfiguredModelStatus(
+                role=role,
+                model=model,
+                installed=None if installed_models is None else _ollama_model_is_installed(model, installed_models),
+            )
+            for role, model in configured_models
+        ]
+        obsidian_vault: ObsidianVault | None = app.state.obsidian_vault
+        obsidian_available = obsidian_vault is not None and obsidian_vault.is_available()
+        integrations = [
+            IntegrationStatus(
+                name="Obsidian vault",
+                enabled=obsidian_available,
+                detail=(
+                    "Available locally"
+                    if obsidian_available
+                    else "Configured path is unavailable"
+                    if obsidian_vault is not None
+                    else "Not configured"
+                ),
+            ),
+            IntegrationStatus(
+                name="Web search",
+                enabled=settings.web_search_enabled,
+                detail="Configured; checked when used" if settings.web_search_enabled else "Disabled",
+            ),
+            IntegrationStatus(
+                name="Home events",
+                enabled=settings.mqtt_enabled,
+                detail=(
+                    "MQTT connected"
+                    if app.state.mqtt_adapter.is_connected
+                    else "MQTT reconnecting"
+                    if settings.mqtt_enabled
+                    else "Disabled"
+                ),
+            ),
+        ]
+        healthy_models = all(model.installed is True for model in models)
+        return SystemHealthStatus(
+            status="ready" if installed_models is not None and healthy_models else "degraded",
+            ollama_reachable=installed_models is not None,
+            ollama_error=ollama_error,
+            models=models,
+            semantic_recall=app.state.semantic_recall.status(),
+            integrations=integrations,
+        )
 
     @app.get("/events", response_model=list[StoredEvent], tags=["events"])
     async def list_events(limit: int = Query(default=50, ge=1, le=200)) -> list[StoredEvent]:
@@ -364,6 +451,11 @@ app = create_app()
 def run() -> None:
     settings = get_settings()
     uvicorn.run("atlas.main:app", host=settings.host, port=settings.port, log_config=None)
+
+
+def _ollama_model_is_installed(model: str, installed_models: set[str]) -> bool:
+    """Ollama reports default tags explicitly while requests may omit :latest."""
+    return model in installed_models or f"{model}:latest" in installed_models
 
 
 def _sse(event: str, data: dict[str, object]) -> str:

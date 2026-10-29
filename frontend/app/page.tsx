@@ -124,6 +124,27 @@ type SemanticRecallStatus = {
   last_error?: string | null;
 };
 
+type ConfiguredModelStatus = {
+  role: 'fast' | 'deep' | 'embedding';
+  model: string;
+  installed: boolean | null;
+};
+
+type IntegrationStatus = {
+  name: string;
+  enabled: boolean;
+  detail: string;
+};
+
+type SystemHealthStatus = {
+  status: 'ready' | 'degraded';
+  ollama_reachable: boolean;
+  ollama_error?: string | null;
+  models: ConfiguredModelStatus[];
+  semantic_recall: SemanticRecallStatus;
+  integrations: IntegrationStatus[];
+};
+
 type ToolCallPayload = {
   id?: string;
   function?: {
@@ -302,6 +323,10 @@ export default function HomePage() {
   const [connection, setConnection] = useState<'ready' | 'working' | 'offline'>('ready');
   const [conversationToDelete, setConversationToDelete] = useState<ConversationSummary | null>(null);
   const [isDeletingConversation, setIsDeletingConversation] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [systemHealth, setSystemHealth] = useState<SystemHealthStatus | null>(null);
+  const [isLoadingSystemHealth, setIsLoadingSystemHealth] = useState(false);
+  const [systemHealthError, setSystemHealthError] = useState<string | null>(null);
   const transcriptEnd = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -364,6 +389,25 @@ export default function HomePage() {
     } finally {
       setIsLoadingMemories(false);
     }
+  };
+
+  const refreshSystemHealth = async () => {
+    setIsLoadingSystemHealth(true);
+    try {
+      const response = await fetch('/system-health');
+      if (!response.ok) throw new Error('ATLAS could not load system health.');
+      setSystemHealth(await response.json() as SystemHealthStatus);
+      setSystemHealthError(null);
+    } catch (error) {
+      setSystemHealthError(error instanceof Error ? error.message : 'ATLAS could not load system health.');
+    } finally {
+      setIsLoadingSystemHealth(false);
+    }
+  };
+
+  const openSettings = () => {
+    setSettingsOpen(true);
+    void refreshSystemHealth();
   };
 
   useEffect(() => {
@@ -554,7 +598,7 @@ export default function HomePage() {
               <span className="status-orb" />
               <span className="hidden sm:inline">{connection === 'ready' ? 'Runtime ready' : connection === 'working' ? 'Thinking' : 'Runtime offline'}</span>
             </div>
-            <Button variant="ghost" size="icon" className="text-slate-400 hover:bg-white/5 hover:text-white" aria-label="Settings"><Settings2 /></Button>
+            <Button variant="ghost" size="icon" className="text-slate-400 hover:bg-white/5 hover:text-white" aria-label="Open system settings" onClick={openSettings}><Settings2 /></Button>
           </div>
         </header>
 
@@ -658,12 +702,49 @@ export default function HomePage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      <AlertDialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <AlertDialogContent className="system-health-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>System health</AlertDialogTitle>
+            <AlertDialogDescription>Local runtime checks only. Configuration secrets are never shown here.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <SystemHealthView health={systemHealth} error={systemHealthError} loading={isLoadingSystemHealth} onRefresh={() => void refreshSystemHealth()} />
+          <AlertDialogFooter>
+            <AlertDialogCancel>Close</AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </main>
   );
 }
 
 function SidebarItem({ active = false, icon, label, hint, onClick }: { active?: boolean; icon: ReactNode; label: string; hint?: string; onClick?: () => void }) {
   return <button type="button" onClick={onClick} className={`sidebar-item ${active ? 'sidebar-item-active' : ''}`}>{icon}<span className="flex-1 text-left">{label}</span>{hint && <span className="text-[9px] uppercase tracking-[0.1em] text-slate-600">{hint}</span>}</button>;
+}
+
+function SystemHealthView({ health, error, loading, onRefresh }: { health: SystemHealthStatus | null; error: string | null; loading: boolean; onRefresh: () => void }) {
+  if (loading && !health) return <p className="workspace-muted">Checking the local runtime…</p>;
+  if (error && !health) return <div className="system-health-error"><p>{error}</p><Button variant="outline" size="sm" onClick={onRefresh}>Try again</Button></div>;
+  if (!health) return null;
+  const summary = health.status === 'ready' ? 'All configured models are available.' : 'ATLAS needs attention before every local capability is ready.';
+  return <div className="system-health-stack">
+    <div className={`system-health-summary system-health-${health.status}`}><span className="status-orb" /><div><strong>{health.status === 'ready' ? 'Runtime ready' : 'Runtime degraded'}</strong><p>{summary}</p></div><Button variant="ghost" size="icon-xs" aria-label="Refresh system health" onClick={onRefresh} disabled={loading}><RefreshCw className={`size-3 ${loading ? 'animate-spin' : ''}`} /></Button></div>
+    <section className="system-health-section">
+      <p className="eyebrow">Ollama models</p>
+      {!health.ollama_reachable ? <p className="workspace-muted mt-2 text-rose-300">{health.ollama_error ?? 'Ollama could not be reached.'}</p> : <div className="system-health-list mt-2">
+        {health.models.map((model) => <div className="system-health-row" key={model.role}><span className={`health-state ${model.installed ? 'health-state-ready' : 'health-state-error'}`} /><div><strong>{model.role} brain</strong><code>{model.model}</code></div><span>{model.installed ? 'Installed' : 'Missing'}</span></div>)}
+      </div>}
+    </section>
+    <section className="system-health-section">
+      <p className="eyebrow">Past-chat recall</p>
+      <div className="system-health-list mt-2"><div className="system-health-row"><span className={`health-state ${health.semantic_recall.last_error ? 'health-state-error' : 'health-state-ready'}`} /><div><strong>{health.semantic_recall.embedding_model}</strong><code>{health.semantic_recall.indexed_turns} indexed · {health.semantic_recall.pending_turns} pending</code></div><span>{health.semantic_recall.last_error ? 'Needs attention' : health.semantic_recall.enabled ? 'Enabled' : 'Disabled'}</span></div></div>
+      {health.semantic_recall.last_error ? <p className="workspace-muted mt-2 text-amber-200">{health.semantic_recall.last_error}</p> : null}
+    </section>
+    <section className="system-health-section">
+      <p className="eyebrow">Local integrations</p>
+      <div className="system-health-list mt-2">{health.integrations.map((integration) => <div className="system-health-row" key={integration.name}><span className={`health-state ${integration.enabled ? 'health-state-ready' : 'health-state-muted'}`} /><div><strong>{integration.name}</strong><code>{integration.detail}</code></div><span>{integration.enabled ? 'Available' : integration.detail === 'Disabled' ? 'Disabled' : 'Unavailable'}</span></div>)}</div>
+    </section>
+  </div>;
 }
 
 function WorkspacePanel({

@@ -6,7 +6,7 @@ import httpx
 from atlas.config import Settings
 from atlas.llm.models import ChatMessage, MessageRole
 from atlas.llm.ollama import OllamaProvider
-from atlas.llm.provider import LLMUnavailableError
+from atlas.llm.provider import LLMResponseError, LLMUnavailableError
 
 
 def test_ollama_provider_translates_messages_and_response() -> None:
@@ -110,3 +110,28 @@ def test_ollama_provider_streams_normalized_events() -> None:
         return events
 
     assert asyncio.run(exercise()) == [("token", "Hi", None), ("done", "", "qwen3:8b")]
+
+
+def test_ollama_provider_reports_a_streaming_model_error_without_crashing() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "model 'missing' not found"})
+
+    async def exercise() -> str:
+        client = httpx.AsyncClient(
+            base_url="http://ollama.test",
+            transport=httpx.MockTransport(handler),
+        )
+        provider = OllamaProvider(Settings(), client=client)
+        try:
+            async for _ in provider.stream(
+                [ChatMessage(role=MessageRole.USER, content="Hello")],
+                model="missing",
+            ):
+                pass
+        except LLMResponseError as error:
+            return str(error)
+        finally:
+            await client.aclose()
+        raise AssertionError("expected a model error")
+
+    assert asyncio.run(exercise()) == "Ollama request failed: model 'missing' not found"

@@ -56,6 +56,13 @@ class ObsidianVault:
             else Path("/__atlas_unconfigured_obsidian_vault__")
         )
 
+    def is_available(self) -> bool:
+        """Check that the configured vault root is presently accessible."""
+        try:
+            return self._configured_root.is_dir()
+        except OSError:
+            return False
+
     def search(self, query: str, *, limit: int = 5) -> list[ObsidianSearchResult]:
         """Return path, title, and a bounded excerpt for matching Markdown notes."""
         normalized_query = query.strip()

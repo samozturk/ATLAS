@@ -21,6 +21,12 @@ class MQTTEventAdapter:
         self._settings = settings
         self._record_event = record_event
         self._topic_prefix = settings.mqtt_event_topic_prefix.strip("/")
+        self._connected = False
+
+    @property
+    def is_connected(self) -> bool:
+        """Expose connection state for local diagnostics, never broker credentials."""
+        return self._connected
 
     async def run(self) -> None:
         """Reconnect with bounded delay until the application cancels this task."""
@@ -56,12 +62,16 @@ class MQTTEventAdapter:
             identifier=self._settings.mqtt_client_id,
         ) as client:
             await client.subscribe(self._settings.mqtt_topic_filter)
-            log.info("mqtt.connected", topic_filter=self._settings.mqtt_topic_filter)
-            async for message in client.messages:
-                event = self.event_from_message(str(message.topic), bytes(message.payload))
-                if event is not None:
-                    self._record_event(event)
-                    log.info("mqtt.event_received", event_type=event.type, topic=str(message.topic))
+            self._connected = True
+            try:
+                log.info("mqtt.connected", topic_filter=self._settings.mqtt_topic_filter)
+                async for message in client.messages:
+                    event = self.event_from_message(str(message.topic), bytes(message.payload))
+                    if event is not None:
+                        self._record_event(event)
+                        log.info("mqtt.event_received", event_type=event.type, topic=str(message.topic))
+            finally:
+                self._connected = False
 
     def event_from_message(self, topic: str, payload: bytes) -> AtlasEvent | None:
         """Accept only the configured namespace and bound untrusted MQTT payloads."""

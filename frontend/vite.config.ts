@@ -76,6 +76,10 @@ export default defineConfig(async () => {
           target: process.env.ATLAS_API_URL ?? 'http://localhost:8000',
           changeOrigin: true,
         },
+        '/system-health': {
+          target: process.env.ATLAS_API_URL ?? 'http://localhost:8000',
+          changeOrigin: true,
+        },
       },
     },
     plugins: [

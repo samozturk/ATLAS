@@ -24,6 +24,51 @@ from atlas.llm.provider import LLMResponseError, LLMUnavailableError
 log = structlog.get_logger(__name__)
 
 
+class OllamaCatalogError(Exception):
+    """Ollama's local model catalog could not be read."""
+
+
+class OllamaModelCatalog:
+    """Read installed Ollama model names for local diagnostics only."""
+
+    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+        self._owns_client = client is None
+        self._client = client or httpx.AsyncClient(
+            base_url=settings.ollama_base_url.rstrip("/"),
+            timeout=httpx.Timeout(
+                timeout=settings.llm_connect_timeout_seconds,
+                connect=settings.llm_connect_timeout_seconds,
+            ),
+        )
+
+    async def model_names(self) -> set[str]:
+        """Return local tags without exposing any request prompts or secrets."""
+        try:
+            response = await self._client.get("/api/tags")
+        except (httpx.TransportError, httpx.TimeoutException) as error:
+            raise OllamaCatalogError("Ollama could not be reached.") from error
+        if response.is_error:
+            raise OllamaCatalogError("Ollama's model catalog is unavailable.")
+        try:
+            body = response.json()
+        except ValueError as error:
+            raise OllamaCatalogError("Ollama returned an invalid model catalog.") from error
+        models = body.get("models") if isinstance(body, dict) else None
+        if not isinstance(models, list):
+            raise OllamaCatalogError("Ollama returned an invalid model catalog.")
+        return {
+            name
+            for item in models
+            if isinstance(item, dict)
+            for name in (item.get("name"), item.get("model"))
+            if isinstance(name, str) and name
+        }
+
+    async def aclose(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
+
+
 class OllamaProvider:
     """Translate ATLAS's LLM contract to Ollama's local chat API."""
 
@@ -145,9 +190,12 @@ class OllamaProvider:
             await asyncio.sleep(delay)
 
     async def _error_detail(self, response: httpx.Response) -> str:
+        # Responses obtained via AsyncClient.stream have not been consumed yet.
+        # Read the bounded error body first so model-not-found remains useful.
         try:
+            await response.aread()
             body = response.json()
-        except json.JSONDecodeError:
+        except (httpx.HTTPError, json.JSONDecodeError):
             body = None
         if isinstance(body, dict) and isinstance(body.get("error"), str):
             return f"Ollama request failed: {body['error']}"
