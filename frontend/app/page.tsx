@@ -24,6 +24,7 @@ import {
   MessageSquare,
   MoreHorizontal,
   PanelLeft,
+  Pencil,
   Plus,
   Radio,
   RefreshCw,
@@ -401,6 +402,26 @@ export default function HomePage() {
     }
   };
 
+  const updatePersonalMemory = async (id: string, fact: string, category: string) => {
+    const response = await fetch(`/memories/${id}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ fact, category }),
+    });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => null) as { detail?: string } | null;
+      throw new Error(detail?.detail || 'ATLAS could not update this memory.');
+    }
+    const updated = await response.json() as PersonalMemory;
+    setPersonalMemories((current) => current.map((memory) => memory.id === id ? updated : memory));
+  };
+
+  const deletePersonalMemory = async (id: string) => {
+    const response = await fetch(`/memories/${id}`, { method: 'DELETE' });
+    if (!response.ok) throw new Error('ATLAS could not remove this memory.');
+    setPersonalMemories((current) => current.filter((memory) => memory.id !== id));
+  };
+
   const refreshSystemHealth = async () => {
     setIsLoadingSystemHealth(true);
     try {
@@ -551,6 +572,17 @@ export default function HomePage() {
     }
   };
 
+  const openMemorySourceConversation = async (id: string) => {
+    if (isStreaming) return;
+    try {
+      await loadConversation(id);
+      setWorkspaceView('chat');
+      setConnection('ready');
+    } catch {
+      setConnection('offline');
+    }
+  };
+
   const deleteConversation = async () => {
     const selected = conversationToDelete;
     if (!selected || isDeletingConversation) return;
@@ -675,6 +707,9 @@ export default function HomePage() {
               semanticRecall={semanticRecall}
               isLoadingMemories={isLoadingMemories}
               memoriesError={memoriesError}
+              onUpdateMemory={updatePersonalMemory}
+              onDeleteMemory={deletePersonalMemory}
+              onOpenMemorySource={(id) => void openMemorySourceConversation(id)}
               onRefresh={() => {
                 if (workspaceView === 'memory') void refreshMemories();
                 else void refreshEvents();
@@ -772,6 +807,9 @@ function WorkspacePanel({
   semanticRecall,
   isLoadingMemories,
   memoriesError,
+  onUpdateMemory,
+  onDeleteMemory,
+  onOpenMemorySource,
   onRefresh,
 }: {
   view: Exclude<WorkspaceView, 'chat'>;
@@ -784,6 +822,9 @@ function WorkspacePanel({
   semanticRecall: SemanticRecallStatus | null;
   isLoadingMemories: boolean;
   memoriesError: string | null;
+  onUpdateMemory: (id: string, fact: string, category: string) => Promise<void>;
+  onDeleteMemory: (id: string) => Promise<void>;
+  onOpenMemorySource: (id: string) => void;
   onRefresh: () => void;
 }) {
   const title = view === 'memory' ? 'Memory' : view === 'home' ? 'Home state' : 'Event feed';
@@ -807,6 +848,9 @@ function WorkspacePanel({
           semanticRecall={semanticRecall}
           isLoading={isLoadingMemories}
           error={memoriesError}
+          onUpdateMemory={onUpdateMemory}
+          onDeleteMemory={onDeleteMemory}
+          onOpenMemorySource={onOpenMemorySource}
         /> : <EventsView
           events={view === 'home' ? latestEvents : events}
           isLoading={isLoadingEvents}
@@ -825,6 +869,9 @@ function MemoryView({
   semanticRecall,
   isLoading,
   error,
+  onUpdateMemory,
+  onDeleteMemory,
+  onOpenMemorySource,
 }: {
   conversations: ConversationSummary[];
   messages: Message[];
@@ -832,9 +879,55 @@ function MemoryView({
   semanticRecall: SemanticRecallStatus | null;
   isLoading: boolean;
   error: string | null;
+  onUpdateMemory: (id: string, fact: string, category: string) => Promise<void>;
+  onDeleteMemory: (id: string) => Promise<void>;
+  onOpenMemorySource: (id: string) => void;
 }) {
   const userMessages = messages.filter((message) => message.role === 'user').length;
   const assistantMessages = messages.filter((message) => message.role === 'assistant').length;
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draftFact, setDraftFact] = useState('');
+  const [draftCategory, setDraftCategory] = useState('');
+  const [memoryToDelete, setMemoryToDelete] = useState<PersonalMemory | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const startEditing = (memory: PersonalMemory) => {
+    setActionError(null);
+    setEditingId(memory.id);
+    setDraftFact(memory.fact);
+    setDraftCategory(memory.category);
+  };
+
+  const saveMemory = async (memory: PersonalMemory) => {
+    if (isSaving) return;
+    setIsSaving(true);
+    setActionError(null);
+    try {
+      await onUpdateMemory(memory.id, draftFact, draftCategory);
+      setEditingId(null);
+    } catch (saveError) {
+      setActionError(saveError instanceof Error ? saveError.message : 'ATLAS could not update this memory.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const removeMemory = async () => {
+    if (!memoryToDelete || isDeleting) return;
+    setIsDeleting(true);
+    setActionError(null);
+    try {
+      await onDeleteMemory(memoryToDelete.id);
+      setMemoryToDelete(null);
+    } catch (deleteError) {
+      setActionError(deleteError instanceof Error ? deleteError.message : 'ATLAS could not remove this memory.');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   return <div className="workspace-stack">
     <p className="workspace-intro">Your conversations stay on this machine and are restored when you return.</p>
     <div className="workspace-metrics">
@@ -845,12 +938,19 @@ function MemoryView({
     <section className="workspace-card">
       <p className="eyebrow">What ATLAS remembers about you</p>
       {error ? <p className="workspace-muted mt-3 text-rose-300">{error}</p> : null}
+      {actionError ? <p className="workspace-muted mt-3 text-rose-300">{actionError}</p> : null}
       {isLoading ? <p className="workspace-muted mt-3">Reviewing the local profile…</p> : null}
       {!isLoading && !error && !memories.length ? <p className="workspace-muted mt-3">Nothing saved yet. Five minutes after a conversation becomes idle, ATLAS reviews explicit, durable facts you shared and adds any safe ones here.</p> : null}
       {!isLoading && !error && memories.length ? <div className="personal-memory-list mt-3">
         {memories.map((memory) => <article className="personal-memory-card" key={memory.id}>
-          <div className="flex items-start justify-between gap-3"><p>{memory.fact}</p><span>{memory.category}</span></div>
-          <time>Last confirmed {formatMemoryTime(memory.last_confirmed_at)}</time>
+          {editingId === memory.id ? <div className="personal-memory-editor">
+            <label>Fact<textarea value={draftFact} onChange={(event) => setDraftFact(event.target.value)} maxLength={500} disabled={isSaving} /></label>
+            <label>Category<input value={draftCategory} onChange={(event) => setDraftCategory(event.target.value)} maxLength={80} disabled={isSaving} /></label>
+            <div className="personal-memory-actions"><Button type="button" size="sm" onClick={() => void saveMemory(memory)} disabled={isSaving || !draftFact.trim() || !draftCategory.trim()}>{isSaving ? 'Saving…' : 'Save'}</Button><Button type="button" variant="ghost" size="sm" onClick={() => setEditingId(null)} disabled={isSaving}>Cancel</Button></div>
+          </div> : <>
+            <div className="flex items-start justify-between gap-3"><p>{memory.fact}</p><span>{memory.category}</span></div>
+            <div className="personal-memory-meta"><time>Last confirmed {formatMemoryTime(memory.last_confirmed_at)}</time><div className="personal-memory-actions">{memory.source_conversation_id ? <Button type="button" variant="ghost" size="sm" className="personal-memory-source" onClick={() => onOpenMemorySource(memory.source_conversation_id!)}>Source chat</Button> : null}<Button type="button" variant="ghost" size="icon-xs" aria-label="Edit memory" title="Edit memory" onClick={() => startEditing(memory)}><Pencil className="size-3" /></Button><Button type="button" variant="ghost" size="icon-xs" className="text-slate-500 hover:bg-rose-500/10 hover:text-rose-300" aria-label="Remove memory" title="Remove memory" onClick={() => setMemoryToDelete(memory)}><Trash2 className="size-3" /></Button></div></div>
+          </>}
         </article>)}
       </div> : null}
     </section>
@@ -870,6 +970,18 @@ function MemoryView({
       <ul className="workspace-list"><li>Conversation messages and timestamps</li><li>Selected brain and model for each response</li><li>Tool activity and results for the conversation</li></ul>
       <p className="workspace-muted">Personal memory is local and inspectable here. ATLAS only adds explicit, durable facts you share; it skips guesses and sensitive details.</p>
     </section>
+    <AlertDialog open={memoryToDelete !== null} onOpenChange={(open) => { if (!open && !isDeleting) setMemoryToDelete(null); }}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Remove this memory?</AlertDialogTitle>
+          <AlertDialogDescription>This removes the fact from ATLAS’s personal profile. It does not delete the original conversation.</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
+          <AlertDialogAction variant="destructive" onClick={() => void removeMemory()} disabled={isDeleting}>{isDeleting ? 'Removing…' : 'Remove memory'}</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   </div>;
 }
 

@@ -99,6 +99,34 @@ def test_memory_api_returns_the_local_profile(tmp_path: Path) -> None:
     assert response.json()[0]["fact"] == "The user uses ATLAS at home."
 
 
+def test_memory_api_allows_reviewing_and_removing_a_profile_fact(tmp_path: Path) -> None:
+    app = create_app(Settings(database_path=str(tmp_path / "atlas.db")), provider=MemoryProvider())
+
+    with TestClient(app) as client:
+        conversation = app.state.conversation_store.create_conversation()
+        app.state.conversation_store.append_message(
+            conversation.id, role="user", content="I use ATLAS at home."
+        )
+        updated_at = app.state.conversation_store.get_conversation(conversation.id).updated_at
+        assert app.state.conversation_store.complete_personal_memory_scan(
+            conversation_id=conversation.id,
+            expected_updated_at=updated_at,
+            memories=[("The user uses ATLAS at home.", "household")],
+        )
+        memory_id = client.get("/memories").json()[0]["id"]
+        updated = client.put(
+            f"/memories/{memory_id}",
+            json={"fact": "The user uses ATLAS in their home office.", "category": "workspace"},
+        )
+        deleted = client.delete(f"/memories/{memory_id}")
+
+    assert updated.status_code == 200
+    assert updated.json()["fact"] == "The user uses ATLAS in their home office."
+    assert updated.json()["category"] == "workspace"
+    assert deleted.status_code == 204
+    assert app.state.conversation_store.list_personal_memories() == []
+
+
 def test_memory_parser_rejects_sensitive_and_malformed_candidates() -> None:
     assert _parse_candidates("not JSON", limit=8) == []
     assert _parse_candidates(

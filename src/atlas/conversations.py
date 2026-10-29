@@ -19,6 +19,14 @@ class ConversationNotFoundError(LookupError):
     """Raised when a requested local conversation does not exist."""
 
 
+class PersonalMemoryNotFoundError(LookupError):
+    """Raised when a requested local profile fact does not exist."""
+
+
+class DuplicatePersonalMemoryError(ValueError):
+    """Raised when an edit would duplicate another saved profile fact."""
+
+
 class StoredToolActivity(BaseModel):
     """One tool call made while producing a stored assistant response."""
 
@@ -463,6 +471,53 @@ class ConversationStore:
             )
             for row in rows
         ]
+
+    def update_personal_memory(self, memory_id: str, *, fact: str, category: str) -> PersonalMemory:
+        """Edit one reviewed profile fact without retaining a duplicate fingerprint."""
+        normalized_fact = " ".join(fact.split())
+        normalized_category = " ".join(category.split())
+        if not normalized_fact or not normalized_category:
+            raise ValueError("memory fact and category cannot be blank")
+        fingerprint = sha256(normalized_fact.casefold().encode()).hexdigest()
+        now = _now()
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT id FROM personal_memories WHERE id = ?", (memory_id,)
+            ).fetchone()
+            if existing is None:
+                raise PersonalMemoryNotFoundError(memory_id)
+            duplicate = connection.execute(
+                "SELECT id FROM personal_memories WHERE fingerprint = ? AND id != ?",
+                (fingerprint, memory_id),
+            ).fetchone()
+            if duplicate is not None:
+                raise DuplicatePersonalMemoryError("An identical memory already exists.")
+            connection.execute(
+                "UPDATE personal_memories SET fact = ?, category = ?, fingerprint = ?, last_confirmed_at = ? "
+                "WHERE id = ?",
+                (normalized_fact, normalized_category, fingerprint, _dump_time(now), memory_id),
+            )
+            row = connection.execute(
+                "SELECT id, fact, category, source_conversation_id, created_at, last_confirmed_at "
+                "FROM personal_memories WHERE id = ?",
+                (memory_id,),
+            ).fetchone()
+        assert row is not None
+        return PersonalMemory(
+            id=row["id"],
+            fact=row["fact"],
+            category=row["category"],
+            source_conversation_id=row["source_conversation_id"],
+            created_at=_load_time(row["created_at"]),
+            last_confirmed_at=_load_time(row["last_confirmed_at"]),
+        )
+
+    def delete_personal_memory(self, memory_id: str) -> None:
+        """Remove a profile fact that the user no longer wants ATLAS to use."""
+        with self._connect() as connection:
+            result = connection.execute("DELETE FROM personal_memories WHERE id = ?", (memory_id,))
+            if result.rowcount == 0:
+                raise PersonalMemoryNotFoundError(memory_id)
 
     def store_semantic_turn(
         self,

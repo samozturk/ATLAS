@@ -10,14 +10,16 @@ import structlog
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 from atlas.config import Settings, get_settings
 from atlas.conversations import (
     ConversationNotFoundError,
     ConversationStore,
     ConversationSummary,
+    DuplicatePersonalMemoryError,
     PersonalMemory,
+    PersonalMemoryNotFoundError,
     SemanticConversationTurn,
     StoredConversation,
     StoredEvent,
@@ -75,6 +77,19 @@ class SystemHealthStatus(BaseModel):
     models: list[ConfiguredModelStatus]
     semantic_recall: SemanticRecallStatus
     integrations: list[IntegrationStatus]
+
+
+class PersonalMemoryUpdate(BaseModel):
+    """A user-reviewed replacement for one local profile fact."""
+
+    fact: str = Field(max_length=500)
+    category: str = Field(max_length=80)
+
+    @model_validator(mode="after")
+    def requires_non_blank_values(self) -> "PersonalMemoryUpdate":
+        if not self.fact.strip() or not self.category.strip():
+            raise ValueError("fact and category cannot be blank")
+        return self
 
 
 @asynccontextmanager
@@ -342,6 +357,25 @@ def create_app(
     @app.get("/memories", response_model=list[PersonalMemory], tags=["memory"])
     async def list_personal_memories(limit: int = Query(default=100, ge=1, le=200)) -> list[PersonalMemory]:
         return app.state.conversation_store.list_personal_memories(limit=limit)
+
+    @app.put("/memories/{memory_id}", response_model=PersonalMemory, tags=["memory"])
+    async def update_personal_memory(memory_id: str, update: PersonalMemoryUpdate) -> PersonalMemory:
+        try:
+            return app.state.conversation_store.update_personal_memory(
+                memory_id, fact=update.fact, category=update.category
+            )
+        except PersonalMemoryNotFoundError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found.") from error
+        except DuplicatePersonalMemoryError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+    @app.delete("/memories/{memory_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["memory"])
+    async def delete_personal_memory(memory_id: str) -> Response:
+        try:
+            app.state.conversation_store.delete_personal_memory(memory_id)
+        except PersonalMemoryNotFoundError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found.") from error
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.get("/semantic-recall/status", response_model=SemanticRecallStatus, tags=["memory"])
     async def semantic_recall_status() -> SemanticRecallStatus:
