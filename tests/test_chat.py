@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator, Sequence
 from fastapi.testclient import TestClient
 
 from atlas.config import Settings
+from atlas.conversations import SemanticConversationTurn
 from atlas.llm.models import (
     Brain,
     ChatCompletion,
@@ -61,6 +62,16 @@ class FakeProvider:
         self.closed = True
 
 
+class UniformEmbeddingClient:
+    """Makes any two non-empty texts relevant for API recall metadata tests."""
+
+    async def embed(self, texts: Sequence[str], *, model: str) -> list[list[float]]:
+        return [[1.0, 1.0] for _ in texts]
+
+    async def aclose(self) -> None:
+        return None
+
+
 def test_chat_adds_system_prompt_and_returns_provider_reply() -> None:
     provider = FakeProvider()
     app = create_app(Settings(environment="test", llm_system_prompt="System rule."), provider=provider)
@@ -74,6 +85,7 @@ def test_chat_adds_system_prompt_and_returns_provider_reply() -> None:
         "brain": "fast",
         "model": "test-model",
         "usage": {"prompt_tokens": None, "completion_tokens": None},
+        "recall_sources": [],
     }
     assert provider.messages == [
         ChatMessage(role=MessageRole.SYSTEM, content="System rule."),
@@ -325,6 +337,49 @@ def test_streaming_chat_persists_and_restores_a_conversation_with_tool_activity(
     assert messages[1]["tool_activity"][0]["tool_name"] == "get_current_time"
     assert messages[1]["tool_activity"][0]["ok"] is True
     assert summaries.json()[0]["title"] == "What time is it?"
+
+
+def test_streaming_chat_reports_when_it_uses_an_earlier_conversation(tmp_path) -> None:
+    app = create_app(
+        Settings(
+            environment="test",
+            database_path=str(tmp_path / "atlas.db"),
+            embedding_model="test-embeddings",
+            semantic_retrieval_min_similarity=0.1,
+        ),
+        provider=FakeProvider(),
+        embedding_client=UniformEmbeddingClient(),  # type: ignore[arg-type]
+    )
+
+    with TestClient(app) as client:
+        source = app.state.conversation_store.create_conversation()
+        user = app.state.conversation_store.append_message(
+            source.id, role="user", content="Remember my coffee preference from this earlier conversation."
+        )
+        assistant = app.state.conversation_store.append_message(
+            source.id, role="assistant", content="I will remember your coffee preference."
+        )
+        asyncio.run(
+            app.state.semantic_recall.index_turn(
+                SemanticConversationTurn(
+                    conversation_id=source.id,
+                    user_message=user,
+                    assistant_message=assistant,
+                )
+            )
+        )
+        target = client.post("/conversations").json()
+        response = client.post(
+            "/chat/stream",
+            json={
+                "conversation_id": target["id"],
+                "messages": [{"role": "user", "content": "Can you use my coffee preference from before?"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert 'event: recall' in response.text
+    assert "Remember my coffee preference" in response.text
 
 
 def test_conversation_delete_endpoint_removes_a_saved_chat(tmp_path) -> None:

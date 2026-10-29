@@ -114,12 +114,20 @@ class ChatRequest(BaseModel):
     messages: list[ConversationMessage] = Field(min_length=1, max_length=100)
     brain: Brain = Brain.FAST
     conversation_id: str | None = Field(default=None, min_length=1)
+    use_semantic_recall: bool = True
 
     @model_validator(mode="after")
     def ends_with_user_message(self) -> "ChatRequest":
         if self.messages[-1].role != "user":
             raise ValueError("the final message must have role 'user'")
         return self
+
+
+class RecallSource(BaseModel):
+    """A source chat used for this response, without revealing its excerpt."""
+
+    conversation_id: str
+    title: str
 
 
 class ChatResponse(BaseModel):
@@ -129,3 +137,4 @@ class ChatResponse(BaseModel):
     brain: Brain
     model: str
     usage: Usage = Field(default_factory=Usage)
+    recall_sources: list[RecallSource] = Field(default_factory=list)

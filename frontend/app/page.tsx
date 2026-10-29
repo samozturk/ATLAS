@@ -62,6 +62,7 @@ type Message = {
   model?: string;
   isStreaming?: boolean;
   toolActivity?: ToolActivity[];
+  recallSources?: RecallSource[];
 };
 
 type ToolActivity = {
@@ -160,6 +161,11 @@ type ToolResultPayload = {
   content?: string;
 };
 
+type RecallSource = {
+  conversation_id: string;
+  title: string;
+};
+
 type StreamPayload = {
   type: 'thinking' | 'token' | 'tool_call' | 'tool_result' | 'done';
   content?: string;
@@ -168,6 +174,7 @@ type StreamPayload = {
   detail?: string;
   tool_calls?: ToolCallPayload[];
   tool_results?: ToolResultPayload[];
+  sources?: RecallSource[];
 };
 
 const brains: Record<Brain, { label: string; model: string; description: string; accent: string }> = {
@@ -308,6 +315,7 @@ export default function HomePage() {
   const [brain, setBrain] = useState<Brain>('fast');
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [draft, setDraft] = useState('');
+  const [useSemanticRecall, setUseSemanticRecall] = useState(true);
   const [isStreaming, setIsStreaming] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -452,6 +460,7 @@ export default function HomePage() {
         body: JSON.stringify({
           brain,
           conversation_id: conversationId,
+          use_semantic_recall: useSemanticRecall,
           messages: [{ role: 'user', content }],
         }),
       });
@@ -477,6 +486,9 @@ export default function HomePage() {
           setMessages((current) =>
             current.map((message) => {
               if (message.id !== assistantId) return message;
+              if (frame.event === 'recall') {
+                return { ...message, recallSources: frame.data.sources ?? [] };
+              }
               if (frame.event === 'token') {
                 return { ...message, content: message.content + (frame.data.content ?? '') };
               }
@@ -638,7 +650,7 @@ export default function HomePage() {
               <div className="message-scrollbar flex-1 overflow-y-auto px-4 py-8 sm:px-9">
                 <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
                   <div className="system-line"><span /><p>Local history · Stored on this machine</p><span /></div>
-                  {messages.map((message) => <MessageBubble key={message.id} message={message} />)}
+                  {messages.map((message) => <MessageBubble key={message.id} message={message} onOpenConversation={(id) => void selectConversation(id)} />)}
                   <div ref={transcriptEnd} />
                 </div>
               </div>
@@ -647,7 +659,7 @@ export default function HomePage() {
                 <div className="composer relative">
                   <Textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder="Message ATLAS…" aria-label="Message ATLAS" className="min-h-[96px] resize-none border-0 bg-transparent px-4 py-4 pr-14 text-sm leading-6 text-white placeholder:text-slate-600 focus-visible:ring-0" disabled={isStreaming || isLoadingHistory || !conversationId} />
                   <Button type="submit" size="icon-lg" className="send-button absolute bottom-3 right-3 rounded-xl" disabled={!draft.trim() || isStreaming || isLoadingHistory || !conversationId} aria-label="Send message"><ArrowUp className="size-4" /></Button>
-                  <div className="flex items-center gap-2 px-4 pb-3 text-[10px] font-medium text-slate-600"><Command className="size-3" />Enter to send <span className="mx-0.5 text-slate-800">·</span> Shift + Enter for a new line</div>
+                  <div className="composer-footer"><span className="composer-shortcut"><Command className="size-3" />Enter to send <span className="mx-0.5 text-slate-800">·</span> Shift + Enter for a new line</span><label className="recall-toggle"><input type="checkbox" checked={useSemanticRecall} onChange={(event) => setUseSemanticRecall(event.target.checked)} disabled={isStreaming || isLoadingHistory} />Use past-chat recall</label></div>
                 </div>
               </form>
             </> : <WorkspacePanel
@@ -909,7 +921,7 @@ function ContextBudget({ messages, draft }: { messages: Message[]; draft: string
   </div>;
 }
 
-function MessageBubble({ message }: { message: Message }) {
+function MessageBubble({ message, onOpenConversation }: { message: Message; onOpenConversation: (id: string) => void }) {
   const isAssistant = message.role === 'assistant';
   const selectedBrain = message.brain ? brains[message.brain] : undefined;
   return <article className={`message-row ${isAssistant ? 'message-assistant' : 'message-user'}`}>
@@ -924,6 +936,7 @@ function MessageBubble({ message }: { message: Message }) {
           : <span className="typing-dots"><i /><i /><i /></span>}
       </div>
       {isAssistant && message.toolActivity?.length ? <ToolActivityCard activity={message.toolActivity} isStreaming={message.isStreaming ?? false} /> : null}
+      {isAssistant && message.recallSources?.length ? <div className="recall-sources"><span>Used earlier context from</span>{message.recallSources.map((source) => <button type="button" key={source.conversation_id} onClick={() => onOpenConversation(source.conversation_id)}>{source.title}</button>)}</div> : null}
       {isAssistant && (message.model || message.isStreaming) && <p className="mt-2 text-[10px] text-slate-600">{message.isStreaming ? 'Streaming local response…' : message.model}</p>}
     </div>
   </article>;

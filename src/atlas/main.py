@@ -26,7 +26,7 @@ from atlas.conversations import (
 )
 from atlas.embeddings import EmbeddingError, OllamaEmbeddingClient
 from atlas.events import AtlasEvent
-from atlas.llm.models import ChatRequest, ChatResponse, ConversationMessage, ToolCall
+from atlas.llm.models import ChatRequest, ChatResponse, ConversationMessage, RecallSource, ToolCall
 from atlas.llm.ollama import OllamaCatalogError, OllamaModelCatalog, OllamaProvider
 from atlas.llm.provider import LLMError, LLMProvider
 from atlas.llm.service import ChatService
@@ -215,24 +215,37 @@ def create_app(
         """Keep the small, reviewed profile useful to ATLAS without exposing raw history."""
         return [memory.fact for memory in app.state.conversation_store.list_personal_memories(limit=40)]
 
-    async def recalled_context(query: str, conversation_id: str | None) -> list[str]:
+    async def recalled_context(
+        query: str, conversation_id: str | None, *, enabled: bool
+    ) -> tuple[list[str], list[RecallSource]]:
         """Retrieve small prior-chat excerpts without making semantic search a chat dependency."""
+        if not enabled:
+            return [], []
         try:
             recalls = await app.state.semantic_recall.recall(
                 query, exclude_conversation_id=conversation_id
             )
         except EmbeddingError as error:
             log.warning("semantic_recall.unavailable", detail=str(error))
-            return []
+            return [], []
         budget = settings.semantic_retrieval_max_context_chars
         excerpts: list[str] = []
+        titles = {conversation.id: conversation.title for conversation in app.state.conversation_store.list_conversations()}
+        sources: dict[str, RecallSource] = {}
         for recall in recalls:
             if budget <= 0:
                 break
             excerpt = recall.content[:budget]
             excerpts.append(f"[Earlier conversation]\n{excerpt}")
             budget -= len(excerpt)
-        return excerpts
+            sources.setdefault(
+                recall.conversation_id,
+                RecallSource(
+                    conversation_id=recall.conversation_id,
+                    title=titles.get(recall.conversation_id, "Earlier conversation"),
+                ),
+            )
+        return excerpts, list(sources.values())
 
     async def index_semantic_turn(turn: SemanticConversationTurn) -> None:
         try:
@@ -364,11 +377,16 @@ def create_app(
     @app.post("/chat", response_model=ChatResponse, tags=["chat"])
     async def chat(request: ChatRequest) -> ChatResponse:
         messages, conversation_id, stored_user_message = conversation_messages(request)
+        retrieved_context, recall_sources = await recalled_context(
+            request.messages[-1].content,
+            conversation_id,
+            enabled=request.use_semantic_recall,
+        )
         completion = await app.state.chat_service.reply(
             messages,
             request.brain,
             personal_memory=personal_memory_facts(),
-            retrieved_context=await recalled_context(request.messages[-1].content, conversation_id),
+            retrieved_context=retrieved_context,
         )
         if conversation_id is not None and stored_user_message is not None:
             stored_assistant_message = app.state.conversation_store.append_message(
@@ -390,6 +408,7 @@ def create_app(
             brain=request.brain,
             model=completion.model,
             usage=completion.usage,
+            recall_sources=recall_sources,
         )
 
     @app.post("/chat/stream", tags=["chat"])
@@ -401,11 +420,21 @@ def create_app(
             tool_activity: list[StoredToolActivity] = []
             model = app.state.chat_service.model_for(request.brain)
             try:
+                retrieved_context, recall_sources = await recalled_context(
+                    request.messages[-1].content,
+                    conversation_id,
+                    enabled=request.use_semantic_recall,
+                )
+                if recall_sources:
+                    yield _sse(
+                        "recall",
+                        {"sources": [source.model_dump(mode="json") for source in recall_sources]},
+                    )
                 async for event in app.state.chat_service.stream(
                     messages,
                     request.brain,
                     personal_memory=personal_memory_facts(),
-                    retrieved_context=await recalled_context(request.messages[-1].content, conversation_id),
+                    retrieved_context=retrieved_context,
                 ):
                     if event.type == "token":
                         content.append(event.content)
