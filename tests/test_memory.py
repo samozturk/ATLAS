@@ -127,6 +127,24 @@ def test_memory_api_allows_reviewing_and_removing_a_profile_fact(tmp_path: Path)
     assert app.state.conversation_store.list_personal_memories() == []
 
 
+def test_memory_api_allows_adding_a_manual_profile_fact(tmp_path: Path) -> None:
+    app = create_app(Settings(database_path=str(tmp_path / "atlas.db")), provider=MemoryProvider())
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/memories",
+            json={"fact": "The user prefers a concise daily briefing.", "category": "preference"},
+        )
+        duplicate = client.post(
+            "/memories",
+            json={"fact": "The user prefers a concise daily briefing.", "category": "other"},
+        )
+
+    assert created.status_code == 201
+    assert created.json()["source_conversation_id"] is None
+    assert duplicate.status_code == 409
+
+
 def test_memory_parser_rejects_sensitive_and_malformed_candidates() -> None:
     assert _parse_candidates("not JSON", limit=8) == []
     assert _parse_candidates(

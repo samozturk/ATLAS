@@ -416,6 +416,20 @@ export default function HomePage() {
     setPersonalMemories((current) => current.map((memory) => memory.id === id ? updated : memory));
   };
 
+  const createPersonalMemory = async (fact: string, category: string) => {
+    const response = await fetch('/memories', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ fact, category }),
+    });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => null) as { detail?: string } | null;
+      throw new Error(detail?.detail || 'ATLAS could not add this memory.');
+    }
+    const created = await response.json() as PersonalMemory;
+    setPersonalMemories((current) => [created, ...current]);
+  };
+
   const deletePersonalMemory = async (id: string) => {
     const response = await fetch(`/memories/${id}`, { method: 'DELETE' });
     if (!response.ok) throw new Error('ATLAS could not remove this memory.');
@@ -707,6 +721,7 @@ export default function HomePage() {
               semanticRecall={semanticRecall}
               isLoadingMemories={isLoadingMemories}
               memoriesError={memoriesError}
+              onCreateMemory={createPersonalMemory}
               onUpdateMemory={updatePersonalMemory}
               onDeleteMemory={deletePersonalMemory}
               onOpenMemorySource={(id) => void openMemorySourceConversation(id)}
@@ -807,6 +822,7 @@ function WorkspacePanel({
   semanticRecall,
   isLoadingMemories,
   memoriesError,
+  onCreateMemory,
   onUpdateMemory,
   onDeleteMemory,
   onOpenMemorySource,
@@ -822,6 +838,7 @@ function WorkspacePanel({
   semanticRecall: SemanticRecallStatus | null;
   isLoadingMemories: boolean;
   memoriesError: string | null;
+  onCreateMemory: (fact: string, category: string) => Promise<void>;
   onUpdateMemory: (id: string, fact: string, category: string) => Promise<void>;
   onDeleteMemory: (id: string) => Promise<void>;
   onOpenMemorySource: (id: string) => void;
@@ -848,6 +865,7 @@ function WorkspacePanel({
           semanticRecall={semanticRecall}
           isLoading={isLoadingMemories}
           error={memoriesError}
+          onCreateMemory={onCreateMemory}
           onUpdateMemory={onUpdateMemory}
           onDeleteMemory={onDeleteMemory}
           onOpenMemorySource={onOpenMemorySource}
@@ -869,6 +887,7 @@ function MemoryView({
   semanticRecall,
   isLoading,
   error,
+  onCreateMemory,
   onUpdateMemory,
   onDeleteMemory,
   onOpenMemorySource,
@@ -879,6 +898,7 @@ function MemoryView({
   semanticRecall: SemanticRecallStatus | null;
   isLoading: boolean;
   error: string | null;
+  onCreateMemory: (fact: string, category: string) => Promise<void>;
   onUpdateMemory: (id: string, fact: string, category: string) => Promise<void>;
   onDeleteMemory: (id: string) => Promise<void>;
   onOpenMemorySource: (id: string) => void;
@@ -886,6 +906,7 @@ function MemoryView({
   const userMessages = messages.filter((message) => message.role === 'user').length;
   const assistantMessages = messages.filter((message) => message.role === 'assistant').length;
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [isAdding, setIsAdding] = useState(false);
   const [draftFact, setDraftFact] = useState('');
   const [draftCategory, setDraftCategory] = useState('');
   const [memoryToDelete, setMemoryToDelete] = useState<PersonalMemory | null>(null);
@@ -898,6 +919,28 @@ function MemoryView({
     setEditingId(memory.id);
     setDraftFact(memory.fact);
     setDraftCategory(memory.category);
+  };
+
+  const startAdding = () => {
+    setActionError(null);
+    setEditingId(null);
+    setDraftFact('');
+    setDraftCategory('preference');
+    setIsAdding(true);
+  };
+
+  const addMemory = async () => {
+    if (isSaving) return;
+    setIsSaving(true);
+    setActionError(null);
+    try {
+      await onCreateMemory(draftFact, draftCategory);
+      setIsAdding(false);
+    } catch (createError) {
+      setActionError(createError instanceof Error ? createError.message : 'ATLAS could not add this memory.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const saveMemory = async (memory: PersonalMemory) => {
@@ -936,11 +979,16 @@ function MemoryView({
       <Metric icon={<BrainCircuit />} label="Assistant replies" value={String(assistantMessages)} />
     </div>
     <section className="workspace-card">
-      <p className="eyebrow">What ATLAS remembers about you</p>
+      <div className="flex items-center justify-between gap-3"><p className="eyebrow">What ATLAS remembers about you</p><Button type="button" variant="ghost" size="sm" className="gap-1 text-cyan-200 hover:bg-cyan-300/10 hover:text-cyan-100" onClick={startAdding} disabled={isAdding || isSaving}><Plus className="size-3.5" />Add fact</Button></div>
       {error ? <p className="workspace-muted mt-3 text-rose-300">{error}</p> : null}
       {actionError ? <p className="workspace-muted mt-3 text-rose-300">{actionError}</p> : null}
       {isLoading ? <p className="workspace-muted mt-3">Reviewing the local profile…</p> : null}
       {!isLoading && !error && !memories.length ? <p className="workspace-muted mt-3">Nothing saved yet. Five minutes after a conversation becomes idle, ATLAS reviews explicit, durable facts you shared and adds any safe ones here.</p> : null}
+      {isAdding ? <div className="personal-memory-editor mt-3">
+        <label>Fact<textarea value={draftFact} onChange={(event) => setDraftFact(event.target.value)} maxLength={500} disabled={isSaving} placeholder="For example: The user prefers a concise daily briefing." /></label>
+        <label>Category<input value={draftCategory} onChange={(event) => setDraftCategory(event.target.value)} maxLength={80} disabled={isSaving} /></label>
+        <div className="personal-memory-actions"><Button type="button" size="sm" onClick={() => void addMemory()} disabled={isSaving || !draftFact.trim() || !draftCategory.trim()}>{isSaving ? 'Saving…' : 'Add fact'}</Button><Button type="button" variant="ghost" size="sm" onClick={() => setIsAdding(false)} disabled={isSaving}>Cancel</Button></div>
+      </div> : null}
       {!isLoading && !error && memories.length ? <div className="personal-memory-list mt-3">
         {memories.map((memory) => <article className="personal-memory-card" key={memory.id}>
           {editingId === memory.id ? <div className="personal-memory-editor">

@@ -472,6 +472,44 @@ class ConversationStore:
             for row in rows
         ]
 
+    def create_personal_memory(self, *, fact: str, category: str) -> PersonalMemory:
+        """Add a user-confirmed profile fact with no conversation provenance."""
+        normalized_fact = " ".join(fact.split())
+        normalized_category = " ".join(category.split())
+        if not normalized_fact or not normalized_category:
+            raise ValueError("memory fact and category cannot be blank")
+        fingerprint = sha256(normalized_fact.casefold().encode()).hexdigest()
+        now = _now()
+        memory = PersonalMemory(
+            id=str(uuid4()),
+            fact=normalized_fact,
+            category=normalized_category,
+            source_conversation_id=None,
+            created_at=now,
+            last_confirmed_at=now,
+        )
+        with self._connect() as connection:
+            duplicate = connection.execute(
+                "SELECT 1 FROM personal_memories WHERE fingerprint = ?", (fingerprint,)
+            ).fetchone()
+            if duplicate is not None:
+                raise DuplicatePersonalMemoryError("An identical memory already exists.")
+            connection.execute(
+                "INSERT INTO personal_memories "
+                "(id, fact, category, fingerprint, source_conversation_id, created_at, last_confirmed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    memory.id,
+                    memory.fact,
+                    memory.category,
+                    fingerprint,
+                    None,
+                    _dump_time(memory.created_at),
+                    _dump_time(memory.last_confirmed_at),
+                ),
+            )
+        return memory
+
     def update_personal_memory(self, memory_id: str, *, fact: str, category: str) -> PersonalMemory:
         """Edit one reviewed profile fact without retaining a duplicate fingerprint."""
         normalized_fact = " ".join(fact.split())

@@ -358,6 +358,15 @@ def create_app(
     async def list_personal_memories(limit: int = Query(default=100, ge=1, le=200)) -> list[PersonalMemory]:
         return app.state.conversation_store.list_personal_memories(limit=limit)
 
+    @app.post("/memories", response_model=PersonalMemory, status_code=status.HTTP_201_CREATED, tags=["memory"])
+    async def create_personal_memory(memory: PersonalMemoryUpdate) -> PersonalMemory:
+        try:
+            return app.state.conversation_store.create_personal_memory(
+                fact=memory.fact, category=memory.category
+            )
+        except DuplicatePersonalMemoryError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
     @app.put("/memories/{memory_id}", response_model=PersonalMemory, tags=["memory"])
     async def update_personal_memory(memory_id: str, update: PersonalMemoryUpdate) -> PersonalMemory:
         try:
