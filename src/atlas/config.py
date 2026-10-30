@@ -74,6 +74,15 @@ class Settings(BaseSettings):
     mqtt_event_topic_prefix: str = Field(default="atlas/events", min_length=1, max_length=240)
     mqtt_reconnect_delay_seconds: float = Field(default=5.0, ge=1, le=60)
     mqtt_max_payload_bytes: int = Field(default=32_768, ge=256, le=1_048_576)
+    # NATS is ATLAS's optional internal event bus. It carries the normalized
+    # AtlasEvent envelope between adapters and future deterministic workers.
+    nats_enabled: bool = False
+    nats_url: str = "nats://localhost:4222"
+    nats_event_subject_prefix: str = Field(default="atlas.events", min_length=1, max_length=240)
+    nats_reconnect_delay_seconds: float = Field(default=2.0, ge=1, le=60)
+    # Deterministic rules are local-only reactions to normalized events. They
+    # never issue device commands and can be disabled independently of NATS.
+    event_rules_enabled: bool = True
     weather_request_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     weather_cache_ttl_seconds: int = Field(default=600, ge=60, le=3600)
     llm_system_prompt: str = (

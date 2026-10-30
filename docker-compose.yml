@@ -7,6 +7,8 @@ services:
       ATLAS_OBSIDIAN_VAULT_PATH: /obsidian
       ATLAS_WEB_SEARCH_ENABLED: "true"
       ATLAS_SEARXNG_BASE_URL: http://searxng:8080
+      ATLAS_NATS_ENABLED: "true"
+      ATLAS_NATS_URL: nats://nats:4222
     ports:
       - "8000:8000"
     init: true
@@ -14,6 +16,8 @@ services:
     volumes:
       - atlas-data:/app/data
       - ${ATLAS_OBSIDIAN_HOST_VAULT_PATH:-/Users/sam/Documents/Obsidian Vault}:/obsidian:${ATLAS_OBSIDIAN_MOUNT_MODE:-ro}
+    depends_on:
+      - nats
 
   frontend:
     build:
@@ -46,6 +50,11 @@ services:
     command: valkey-server --save 30 1 --loglevel warning
     volumes:
       - searxng-valkey-data:/data
+    init: true
+    restart: unless-stopped
+
+  nats:
+    image: docker.io/nats:2.10-alpine
     init: true
     restart: unless-stopped
 

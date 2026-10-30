@@ -198,6 +198,33 @@ an ESP32 may publish a hallway temperature reading to
 `temperature.changed` event with the original topic and payload. Messages
 outside `ATLAS_MQTT_EVENT_TOPIC_PREFIX` and payloads over 32 KiB are rejected.
 
+## Internal NATS event bus
+
+Phase 7 adds an optional local NATS backbone for normalized `AtlasEvent`
+messages. Docker Compose starts it automatically and configures ATLAS to use
+the internal `nats` service. MQTT events are still recorded in SQLite first,
+then published to subjects such as `atlas.events.temperature.changed`. Other
+local services can publish the same JSON `AtlasEvent` envelope to that subject;
+ATLAS validates the type/subject match before recording it in the event feed.
+
+For direct, non-Docker runs, leave NATS disabled by default or enable it with:
+
+```env
+ATLAS_NATS_ENABLED=true
+ATLAS_NATS_URL=nats://localhost:4222
+```
+
+NATS does not receive device commands in this phase, and it does not replace
+the durable local event audit in SQLite.
+
+## Deterministic event rules
+
+ATLAS now reacts to a small set of normalised events without involving a
+language model. The first rule turns `device.offline` into a correlated
+`alert.raised` warning visible in the Event feed. It does not command a device,
+send a notification, or make an external request. Disable all such local rules
+with `ATLAS_EVENT_RULES_ENABLED=false`.
+
 ## Chat interface
 
 The React interface lives in `frontend/`. It is a local companion to the ATLAS
@@ -323,10 +350,7 @@ for the chat interface and `http://localhost:8000` for the API.
 
 ## Near-term roadmap
 
-Phase 3 has begun with a typed registry, bounded agent loop, and a read-only
-local time tool. Weather is next once a weather provider and location policy
-are chosen; notes follow when persistent storage is introduced. Persistent
-memory, Obsidian, and MQTT follow after the tool policy boundary is tested.
-NATS later becomes the internal event bus. Those adapters will translate native
-messages into `AtlasEvent` instead of leaking vendor-specific formats through
-the application.
+The local agent, weather, Obsidian, persistent memory, MQTT intake, semantic
+recall, and the Phase 7 NATS transport foundation are now in place. The next
+increment is deterministic event rules, so simple home events can produce safe
+local reactions without invoking the LLM.

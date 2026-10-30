@@ -35,6 +35,8 @@ from atlas.llm.service import ChatService
 from atlas.logging import configure_logging
 from atlas.mqtt import MQTTEventAdapter
 from atlas.memory import PersonalMemoryWorker
+from atlas.nats import NATSEventBus
+from atlas.rules import EventRuleEngine
 from atlas.obsidian import ObsidianVault
 from atlas.semantic_recall import SemanticRecallService, SemanticRecallStatus
 from atlas.tools import (
@@ -99,6 +101,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # databases, workers, and event-bus connections before accepting traffic.
     app.state.conversation_store.initialize()
     app.state.mqtt_task = None
+    app.state.nats_task = None
     app.state.memory_task = asyncio.create_task(
         app.state.personal_memory_worker.run(), name="atlas-personal-memory"
     )
@@ -107,6 +110,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     if settings.mqtt_enabled:
         app.state.mqtt_task = asyncio.create_task(app.state.mqtt_adapter.run(), name="atlas-mqtt")
+    if settings.nats_enabled:
+        app.state.nats_task = asyncio.create_task(app.state.nats_event_bus.run(), name="atlas-nats")
     app.state.ready = True
     log.info("atlas.started", system_event=AtlasEvent(type="system.started").model_dump(mode="json"))
     try:
@@ -127,6 +132,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if mqtt_task is not None:
             mqtt_task.cancel()
             await asyncio.gather(mqtt_task, return_exceptions=True)
+        nats_task: asyncio.Task[None] | None = app.state.nats_task
+        if nats_task is not None:
+            nats_task.cancel()
+            await asyncio.gather(nats_task, return_exceptions=True)
+        event_publish_tasks = list(app.state.event_publish_tasks)
+        for task in event_publish_tasks:
+            task.cancel()
+        await asyncio.gather(*event_publish_tasks, return_exceptions=True)
+        await app.state.nats_event_bus.aclose()
         await app.state.llm_provider.aclose()
         weather_client: OpenMeteoWeatherClient | None = app.state.weather_client
         if weather_client is not None:
@@ -156,7 +170,23 @@ def create_app(
     app.state.settings = settings
     app.state.ready = False
     app.state.conversation_store = ConversationStore(settings.database_path)
-    app.state.mqtt_adapter = MQTTEventAdapter(settings, app.state.conversation_store.record_event)
+
+    def ingest_event(event: AtlasEvent) -> None:
+        """Persist each intake once, apply safe rules, then fan it out over NATS."""
+        _, accepted = app.state.conversation_store.record_event_with_status(event)
+        if not accepted:
+            return
+        for reaction in app.state.event_rules.reactions_for(event):
+            ingest_event(reaction)
+        if settings.nats_enabled:
+            task = asyncio.create_task(app.state.nats_event_bus.publish(event), name="atlas-nats-publish")
+            app.state.event_publish_tasks.add(task)
+            task.add_done_callback(app.state.event_publish_tasks.discard)
+
+    app.state.event_publish_tasks: set[asyncio.Task[bool]] = set()
+    app.state.event_rules = EventRuleEngine(settings)
+    app.state.nats_event_bus = NATSEventBus(settings, ingest_event)
+    app.state.mqtt_adapter = MQTTEventAdapter(settings, ingest_event)
     app.state.llm_provider = provider or OllamaProvider(settings)
     app.state.ollama_catalog = ollama_catalog or OllamaModelCatalog(settings)
     app.state.semantic_recall = SemanticRecallService(
@@ -338,6 +368,22 @@ def create_app(
                     if settings.mqtt_enabled
                     else "Disabled"
                 ),
+            ),
+            IntegrationStatus(
+                name="Internal event bus",
+                enabled=settings.nats_enabled,
+                detail=(
+                    "NATS connected"
+                    if app.state.nats_event_bus.is_connected
+                    else "NATS reconnecting"
+                    if settings.nats_enabled
+                    else "Disabled"
+                ),
+            ),
+            IntegrationStatus(
+                name="Event rules",
+                enabled=settings.event_rules_enabled,
+                detail="Deterministic local reactions" if settings.event_rules_enabled else "Disabled",
             ),
         ]
         healthy_models = all(model.installed is True for model in models)

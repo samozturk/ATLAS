@@ -332,10 +332,15 @@ class ConversationStore:
 
     def record_event(self, event: AtlasEvent) -> StoredEvent:
         """Persist one normalized event before any future rule or LLM consumer sees it."""
+        stored_event, _ = self.record_event_with_status(event)
+        return stored_event
+
+    def record_event_with_status(self, event: AtlasEvent) -> tuple[StoredEvent, bool]:
+        """Persist an event once and report whether it was newly accepted."""
         received_at = _now()
         stored_event = StoredEvent(**event.model_dump(), received_at=received_at)
         with self._connect() as connection:
-            connection.execute(
+            result = connection.execute(
                 "INSERT OR IGNORE INTO events "
                 "(id, type, source, occurred_at, correlation_id, payload_json, received_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -349,7 +354,7 @@ class ConversationStore:
                     _dump_time(stored_event.received_at),
                 ),
             )
-        return stored_event
+        return stored_event, result.rowcount == 1
 
     def list_events(self, *, limit: int = 50) -> list[StoredEvent]:
         """Read the newest local home events without exposing broker internals."""
