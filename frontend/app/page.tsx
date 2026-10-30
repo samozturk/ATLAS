@@ -322,6 +322,7 @@ export default function HomePage() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [conversationSearch, setConversationSearch] = useState('');
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('chat');
   const [homeEvents, setHomeEvents] = useState<HomeEvent[]>([]);
   const [isLoadingEvents, setIsLoadingEvents] = useState(false);
@@ -635,6 +636,11 @@ export default function HomePage() {
     }
   };
 
+  const normalizedConversationSearch = conversationSearch.trim().toLocaleLowerCase();
+  const visibleConversations = normalizedConversationSearch
+    ? conversations.filter((conversation) => conversation.title.toLocaleLowerCase().includes(normalizedConversationSearch))
+    : conversations.slice(0, 6);
+
   return (
     <main className="atlas-shell min-h-dvh overflow-hidden text-slate-100">
       <div className="atmosphere atmosphere-one" />
@@ -676,12 +682,14 @@ export default function HomePage() {
                 <SidebarItem active={workspaceView === 'events'} icon={<Activity />} label="Event feed" onClick={() => selectWorkspaceView('events')} />
               </nav>
               <div className="mt-6 border-t border-white/[0.06] pt-4">
-                <p className="px-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">Recent conversations</p>
+                <div className="flex items-center justify-between gap-2 px-2"><p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">{normalizedConversationSearch ? 'Matching conversations' : 'Recent conversations'}</p>{normalizedConversationSearch ? <button type="button" className="conversation-search-clear" onClick={() => setConversationSearch('')}>Clear</button> : null}</div>
+                <label className="conversation-search"><Search className="size-3" /><input value={conversationSearch} onChange={(event) => setConversationSearch(event.target.value)} placeholder="Search saved chats" aria-label="Search saved conversations" /></label>
                 <div className="mt-2 space-y-1">
-                  {conversations.slice(0, 6).map((conversation) => <div className="conversation-row" key={conversation.id}>
+                  {visibleConversations.map((conversation) => <div className="conversation-row" key={conversation.id}>
                     <button type="button" onClick={() => void selectConversation(conversation.id)} className={`conversation-item ${conversation.id === conversationId ? 'conversation-item-active' : ''}`} title={conversation.title}>{conversation.title}</button>
                     {conversationToDelete?.id === conversation.id ? <div className="conversation-delete-confirm"><Button type="button" variant="ghost" size="xs" onClick={() => { setConversationToDelete(null); setConversationDeleteError(null); }} disabled={isDeletingConversation}>Keep</Button><Button type="button" variant="destructive" size="xs" onClick={() => void deleteConversation()} disabled={isDeletingConversation}>{isDeletingConversation ? '…' : 'Delete'}</Button></div> : <Button type="button" variant="ghost" size="icon-xs" className="conversation-delete text-slate-500 hover:bg-rose-500/10 hover:text-rose-300" aria-label={`Delete ${conversation.title}`} title="Delete conversation" disabled={isStreaming} onClick={() => { setConversationDeleteError(null); setConversationToDelete(conversation); }}><Trash2 className="size-3" /></Button>}
                   </div>)}
+                  {normalizedConversationSearch && !visibleConversations.length ? <p className="conversation-search-empty">No saved chats match that title.</p> : null}
                 </div>
                 {conversationDeleteError ? <p className="conversation-delete-error">{conversationDeleteError}</p> : null}
               </div>
