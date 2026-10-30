@@ -22,6 +22,8 @@ import {
   History,
   Home,
   MessageSquare,
+  Mic,
+  MicOff,
   MoreHorizontal,
   PanelLeft,
   Pencil,
@@ -54,6 +56,7 @@ import {
 
 type Brain = 'fast' | 'deep';
 type WorkspaceView = 'chat' | 'memory' | 'home' | 'events';
+type VoiceState = 'idle' | 'connecting' | 'listening' | 'activated' | 'unavailable' | 'error';
 
 type Message = {
   id: string;
@@ -125,6 +128,13 @@ type SemanticRecallStatus = {
   indexed_turns: number;
   pending_turns: number;
   last_error?: string | null;
+};
+
+type VoiceHealth = {
+  status: 'ready' | 'waiting_for_model';
+  wake_word: string;
+  model_available: boolean;
+  sample_rate: number;
 };
 
 type ConfiguredModelStatus = {
@@ -270,6 +280,11 @@ function compactTokenCount(value: number): string {
   return String(value);
 }
 
+function voiceSocketUrl(): string {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.host}/voice/wake`;
+}
+
 function toolActivityFromCalls(toolCalls: ToolCallPayload[]): ToolActivity[] {
   return toolCalls.flatMap((toolCall, index) => {
     const name = toolCall.function?.name;
@@ -340,11 +355,120 @@ export default function HomePage() {
   const [systemHealth, setSystemHealth] = useState<SystemHealthStatus | null>(null);
   const [isLoadingSystemHealth, setIsLoadingSystemHealth] = useState(false);
   const [systemHealthError, setSystemHealthError] = useState<string | null>(null);
+  const [voiceState, setVoiceState] = useState<VoiceState>('idle');
+  const [voiceDetail, setVoiceDetail] = useState('Wake word off');
   const transcriptEnd = useRef<HTMLDivElement>(null);
+  const voiceSocket = useRef<WebSocket | null>(null);
+  const voiceStream = useRef<MediaStream | null>(null);
+  const voiceContext = useRef<AudioContext | null>(null);
+  const voiceProcessor = useRef<ScriptProcessorNode | null>(null);
+  const voiceSink = useRef<GainNode | null>(null);
 
   useEffect(() => {
     transcriptEnd.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages, isStreaming]);
+
+  const stopVoiceListening = () => {
+    voiceSocket.current?.close();
+    voiceSocket.current = null;
+    voiceProcessor.current?.disconnect();
+    voiceProcessor.current = null;
+    voiceSink.current?.disconnect();
+    voiceSink.current = null;
+    void voiceContext.current?.close();
+    voiceContext.current = null;
+    voiceStream.current?.getTracks().forEach((track) => track.stop());
+    voiceStream.current = null;
+    setVoiceState('idle');
+    setVoiceDetail('Wake word off');
+  };
+
+  useEffect(() => () => {
+    voiceSocket.current?.close();
+    voiceProcessor.current?.disconnect();
+    voiceSink.current?.disconnect();
+    void voiceContext.current?.close();
+    voiceStream.current?.getTracks().forEach((track) => track.stop());
+  }, []);
+
+  const startVoiceListening = async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setVoiceState('error');
+      setVoiceDetail('This browser cannot provide microphone audio.');
+      return;
+    }
+    setVoiceState('connecting');
+    setVoiceDetail('Checking local ATLAS wake-word model…');
+    try {
+      const healthResponse = await fetch('/voice/health');
+      if (!healthResponse.ok) throw new Error('The local voice service is unavailable.');
+      const health = await healthResponse.json() as VoiceHealth;
+      if (!health.model_available) {
+        setVoiceState('unavailable');
+        setVoiceDetail('Add the custom ATLAS ONNX model to enable listening.');
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, sampleRate: 16_000, echoCancellation: true, noiseSuppression: true },
+      });
+      const context = new AudioContext({ sampleRate: health.sample_rate });
+      if (context.sampleRate !== health.sample_rate) {
+        stream.getTracks().forEach((track) => track.stop());
+        await context.close();
+        throw new Error('Your browser cannot provide the required 16 kHz microphone stream.');
+      }
+      const socket = new WebSocket(voiceSocketUrl());
+      voiceSocket.current = socket;
+      voiceStream.current = stream;
+      voiceContext.current = context;
+      socket.binaryType = 'arraybuffer';
+      socket.onopen = () => {
+        const source = context.createMediaStreamSource(stream);
+        const processor = context.createScriptProcessor(4096, 1, 1);
+        const sink = context.createGain();
+        sink.gain.value = 0;
+        processor.onaudioprocess = (event) => {
+          if (socket.readyState !== WebSocket.OPEN) return;
+          const samples = event.inputBuffer.getChannelData(0);
+          const pcm = new Int16Array(samples.length);
+          for (let index = 0; index < samples.length; index += 1) {
+            pcm[index] = Math.max(-1, Math.min(1, samples[index])) * 0x7fff;
+          }
+          socket.send(pcm.buffer);
+        };
+        source.connect(processor);
+        processor.connect(sink);
+        sink.connect(context.destination);
+        voiceProcessor.current = processor;
+        voiceSink.current = sink;
+      };
+      socket.onmessage = (event) => {
+        const message = JSON.parse(event.data as string) as { type?: string; detail?: string; wake_word?: string };
+        if (message.type === 'ready') {
+          setVoiceState('listening');
+          setVoiceDetail(`Listening for ${message.wake_word ?? 'ATLAS'}…`);
+        } else if (message.type === 'wake_detected') {
+          setVoiceState('activated');
+          setVoiceDetail(`${message.wake_word ?? 'ATLAS'} heard — ready for your command.`);
+          window.setTimeout(() => {
+            setVoiceState('listening');
+            setVoiceDetail(`Listening for ${message.wake_word ?? 'ATLAS'}…`);
+          }, 3_000);
+        } else if (message.type === 'unavailable') {
+          setVoiceState('unavailable');
+          setVoiceDetail(message.detail ?? 'The local wake-word model is unavailable.');
+        }
+      };
+      socket.onerror = () => {
+        setVoiceState('error');
+        setVoiceDetail('The local voice connection failed.');
+      };
+    } catch (error) {
+      stopVoiceListening();
+      setVoiceState('error');
+      setVoiceDetail(error instanceof Error ? error.message : 'ATLAS could not start voice listening.');
+    }
+  };
 
   const loadConversation = async (id: string) => {
     const response = await fetch(`/conversations/${id}`);
@@ -663,6 +787,7 @@ export default function HomePage() {
             <Radio className="size-3.5 text-cyan-300" /> Local mesh · Touwerij
           </div>
           <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" className={`gap-1.5 text-slate-400 hover:bg-white/5 hover:text-white ${voiceState === 'listening' ? 'text-cyan-200' : voiceState === 'activated' ? 'text-emerald-200' : ''}`} aria-label={voiceState === 'listening' || voiceState === 'activated' ? 'Stop always-listening wake word' : 'Start always-listening wake word'} title={voiceDetail} onClick={() => voiceState === 'listening' || voiceState === 'activated' || voiceState === 'connecting' ? stopVoiceListening() : void startVoiceListening()}><span className={`voice-status-orb voice-status-${voiceState}`} />{voiceState === 'listening' || voiceState === 'activated' || voiceState === 'connecting' ? <Mic className="size-3.5" /> : <MicOff className="size-3.5" />}<span className="hidden lg:inline">{voiceState === 'listening' ? 'Listening' : voiceState === 'activated' ? 'ATLAS heard' : 'Voice'}</span></Button>
             <div className={`connection-chip connection-${connection}`}>
               <span className="status-orb" />
               <span className="hidden sm:inline">{connection === 'ready' ? 'Runtime ready' : connection === 'working' ? 'Thinking' : 'Runtime offline'}</span>

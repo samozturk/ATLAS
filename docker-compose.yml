@@ -24,11 +24,25 @@ services:
       context: ./frontend
     environment:
       ATLAS_API_URL: http://atlas:8000
+      ATLAS_VOICE_URL: http://voice:8081
       ATLAS_UI_ALLOWED_HOSTS: cortex
     ports:
       - "3001:3001"
     depends_on:
       - atlas
+      - voice
+    init: true
+    restart: unless-stopped
+
+  voice:
+    build:
+      context: ./voice
+    environment:
+      ATLAS_WAKE_WORD: ATLAS
+      ATLAS_WAKE_WORD_MODEL_PATH: /models/atlas.onnx
+      ATLAS_WAKE_WORD_THRESHOLD: "0.5"
+    volumes:
+      - ${ATLAS_VOICE_MODEL_HOST_PATH:-./voice-models}:/models:ro
     init: true
     restart: unless-stopped
 

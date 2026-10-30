@@ -225,6 +225,28 @@ language model. The first rule turns `device.offline` into a correlated
 send a notification, or make an external request. Disable all such local rules
 with `ATLAS_EVENT_RULES_ENABLED=false`.
 
+## Always-listening ATLAS wake word
+
+Phase 8 begins with a local openWakeWord sidecar. It keeps a browser-selected
+microphone stream on the local Docker network, where it evaluates a custom
+ONNX model for the wake word **ATLAS**. No microphone audio is sent to a cloud
+speech service.
+
+Before starting Compose, place a custom openWakeWord ONNX model trained for
+the phrase `ATLAS` here:
+
+```text
+voice-models/atlas.onnx
+```
+
+Or set `ATLAS_VOICE_MODEL_HOST_PATH` in `.env` to the folder that contains the
+model. The model folder is ignored by Git and mounted read-only into the voice
+service. After `docker compose up --build -d`, click **Voice** in ATLAS’s
+header and approve the browser microphone prompt. The indicator changes to
+**Listening** and then **ATLAS heard** when the model activates. Speech-to-text
+and voice replies are the next increments; this initial implementation detects
+the wake word only.
+
 ## Chat interface
 
 The React interface lives in `frontend/`. It is a local companion to the ATLAS
